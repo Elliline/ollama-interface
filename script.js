@@ -22,7 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // Load available models from Ollama
 async function loadModels() {
   try {
-    const response = await fetch('http://192.168.1.181:11434/api/tags');
+    const response = await fetch('/api/tags');
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -99,7 +99,7 @@ async function sendMessage() {
   
   try {
     // Send message to Ollama API
-    const response = await fetch('http://192.168.1.181:11434/api/chat', {
+    const response = await fetch('/api/chat', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
