@@ -1,0 +1,9 @@
+{
+  "name": "ollama-interface",
+  "version": "1.0.0",
+  "description": "Ollama chat interface",
+  "scripts": {
+    "build": "echo 'No build needed for static site'",
+    "start": "echo 'Static site - use any web server'"
+  }
+}
