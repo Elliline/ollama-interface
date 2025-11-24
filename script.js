@@ -1,3 +1,8 @@
+/**
+ * Ollama Chat Interface
+ * A web-based interface for interacting with local AI models
+ */
+
 // DOM Elements
 const modelSelect = document.getElementById('modelSelect');
 const newChatBtn = document.getElementById('newChatBtn');
@@ -11,6 +16,7 @@ const typingIndicator = document.getElementById('typingIndicator');
 let currentModel = '';
 let conversation = [];
 let isTyping = false;
+let lastAssistantMessageId = null;
 
 // Initialize the app
 document.addEventListener('DOMContentLoaded', () => {
@@ -50,19 +56,29 @@ async function loadModels() {
 
 // Load conversation from session storage
 function loadConversation() {
-  const savedConversation = sessionStorage.getItem('ollamaChatConversation');
-  if (savedConversation) {
-    conversation = JSON.parse(savedConversation);
-    renderMessages();
-  } else {
-    // Show welcome message
+  try {
+    const savedConversation = sessionStorage.getItem('ollamaChatConversation');
+    if (savedConversation) {
+      conversation = JSON.parse(savedConversation);
+      renderMessages();
+    } else {
+      // Show welcome message
+      addMessage('system', 'Welcome to Ollama Chat! Select a model and start chatting.');
+    }
+  } catch (error) {
+    console.error('Error loading conversation:', error);
+    conversation = [];
     addMessage('system', 'Welcome to Ollama Chat! Select a model and start chatting.');
   }
 }
 
 // Save conversation to session storage
 function saveConversation() {
-  sessionStorage.setItem('ollamaChatConversation', JSON.stringify(conversation));
+  try {
+    sessionStorage.setItem('ollamaChatConversation', JSON.stringify(conversation));
+  } catch (error) {
+    console.error('Error saving conversation:', error);
+  }
 }
 
 // Set up event listeners
@@ -106,7 +122,7 @@ async function sendMessage() {
       },
       body: JSON.stringify({
         model: currentModel,
-        messages: conversation.map(msg => ({
+        messages: conversation.filter(msg => msg.role === 'user' || msg.role === 'assistant').map(msg => ({
           role: msg.role,
           content: msg.content
         })),
@@ -122,6 +138,16 @@ async function sendMessage() {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let fullResponse = '';
+    
+    // Create a new assistant message for streaming
+    const assistantMessageId = Date.now();
+    conversation.push({
+      role: 'assistant',
+      content: '',
+      id: assistantMessageId
+    });
+    lastAssistantMessageId = assistantMessageId;
+    renderMessages();
     
     while (true) {
       const { done, value } = await reader.read();
@@ -145,11 +171,11 @@ async function sendMessage() {
       }
     }
     
-    // Add assistant response to conversation
-    conversation.push({
-      role: 'assistant',
-      content: fullResponse
-    });
+    // Update the assistant message with the complete response
+    const assistantMessageIndex = conversation.findIndex(msg => msg.id === assistantMessageId);
+    if (assistantMessageIndex !== -1) {
+      conversation[assistantMessageIndex].content = fullResponse;
+    }
     
     saveConversation();
     
@@ -179,7 +205,8 @@ function autoResizeInput() {
 function addMessage(role, content) {
   conversation.push({
     role,
-    content
+    content,
+    id: Date.now()
   });
   
   saveConversation();
@@ -188,9 +215,12 @@ function addMessage(role, content) {
 
 // Update the last message (for streaming responses)
 function updateLastMessage(content) {
-  if (conversation.length > 0) {
-    conversation[conversation.length - 1].content = content;
-    renderMessages();
+  if (lastAssistantMessageId !== null) {
+    const messageIndex = conversation.findIndex(msg => msg.id === lastAssistantMessageId);
+    if (messageIndex !== -1) {
+      conversation[messageIndex].content = content;
+      renderMessages();
+    }
   }
 }
 
@@ -252,10 +282,10 @@ function hideTypingIndicator() {
 // Start a new chat
 function newChat() {
   conversation = [];
+  lastAssistantMessageId = null;
+  sessionStorage.removeItem('ollamaChatConversation');
   renderMessages();
   messageInput.value = '';
   autoResizeInput();
+  addMessage('system', 'Welcome to Ollama Chat! Select a model and start chatting.');
 }
-
-// Auto-resize input on load
-messageInput.addEventListener('input', autoResizeInput);
