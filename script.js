@@ -17,6 +17,9 @@ let currentModel = '';
 let conversation = [];
 let isTyping = false;
 let lastAssistantMessageId = null;
+let streamingMessageElement = null;
+let pendingContent = null;     
+let animationFrameId = null;   
 
 // Initialize the app
 document.addEventListener('DOMContentLoaded', () => {
@@ -140,14 +143,20 @@ async function sendMessage() {
     let fullResponse = '';
     
     // Create a new assistant message for streaming
-    const assistantMessageId = Date.now();
-    conversation.push({
-      role: 'assistant',
-      content: '',
-      id: assistantMessageId
-    });
-    lastAssistantMessageId = assistantMessageId;
-    renderMessages();
+const assistantMessageId = Date.now();
+conversation.push({
+  role: 'assistant',
+  content: '',
+  id: assistantMessageId
+});
+lastAssistantMessageId = assistantMessageId;
+
+// Create the DOM element directly instead of re-rendering everything
+streamingMessageElement = document.createElement('div');
+streamingMessageElement.classList.add('message', 'assistant');
+streamingMessageElement.innerHTML = '<div class="message-content"></div>';
+messagesContainer.appendChild(streamingMessageElement);
+chatContainer.scrollTop = chatContainer.scrollHeight;
     
     while (true) {
       const { done, value } = await reader.read();
@@ -178,6 +187,9 @@ async function sendMessage() {
     }
     
     saveConversation();
+    streamingMessageElement = null;
+    pendingContent = null;
+    animationFrameId = null;
     
   } catch (error) {
     console.error('Error sending message:', error);
@@ -215,11 +227,19 @@ function addMessage(role, content) {
 
 // Update the last message (for streaming responses)
 function updateLastMessage(content) {
-  if (lastAssistantMessageId !== null) {
-    const messageIndex = conversation.findIndex(msg => msg.id === lastAssistantMessageId);
-    if (messageIndex !== -1) {
-      conversation[messageIndex].content = content;
-      renderMessages();
+  if (streamingMessageElement) {
+    pendingContent = content;
+    
+    // Only update once per animation frame (usually 60fps)
+    if (!animationFrameId) {
+      animationFrameId = requestAnimationFrame(() => {
+        if (pendingContent && streamingMessageElement) {
+          const contentElement = streamingMessageElement.querySelector('.message-content');
+          contentElement.innerHTML = formatMessageContent(pendingContent);
+          chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+        animationFrameId = null;
+      });
     }
   }
 }
