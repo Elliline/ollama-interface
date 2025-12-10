@@ -299,3 +299,57 @@ body {
 .chat-container::-webkit-scrollbar-thumb:hover {
   background: #8a66ff;
 }
+
+/* Voice controls */
+.mic-btn {
+  background: #374151;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 15px;
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.mic-btn:hover {
+  background: #4b5563;
+}
+
+.mic-btn.recording {
+  background: #dc2626;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.speaker-btn {
+  background: #374151;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.speaker-btn:hover {
+  background: #4b5563;
+}
+
+.speaker-btn.enabled {
+  background: #059669;
+}
+
+.convo-btn {
+  background: #374151;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 15px;
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+.convo-btn:hover { background: #4b5563; }
+.convo-btn.active { background: #059669; }

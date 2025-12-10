@@ -11,6 +11,9 @@ const messagesContainer = document.getElementById('messages');
 const messageInput = document.getElementById('messageInput');
 const sendBtn = document.getElementById('sendBtn');
 const typingIndicator = document.getElementById('typingIndicator');
+const micBtn = document.getElementById('micBtn');
+const convoModeBtn = document.getElementById('convoModeBtn');
+const speakerToggle = document.getElementById('speakerToggle');
 
 // State variables
 let currentModel = '';
@@ -19,7 +22,18 @@ let isTyping = false;
 let lastAssistantMessageId = null;
 let streamingMessageElement = null;
 let pendingContent = null;     
-let animationFrameId = null;   
+let animationFrameId = null;
+let ttsEnabled = false;
+let isRecording = false;
+let mediaRecorder = null;
+let audioChunks = [];
+let conversationMode = false;
+let silenceTimer = null;
+let audioContext = null;
+let analyser = null;
+let audioUnlocked = false;
+const TTS_URL = 'http://192.168.1.181:5050/tts';
+const STT_URL = 'http://192.168.1.181:5051/transcribe';   
 
 // Initialize the app
 document.addEventListener('DOMContentLoaded', () => {
@@ -91,6 +105,11 @@ function setupEventListeners() {
   sendBtn.addEventListener('click', sendMessage);
   messageInput.addEventListener('keydown', handleKeyDown);
   messageInput.addEventListener('input', autoResizeInput);
+  micBtn.addEventListener('mousedown', startRecording);
+  convoModeBtn.addEventListener('click', toggleConversationMode);
+  micBtn.addEventListener('mouseup', stopRecording);
+  micBtn.addEventListener('mouseleave', stopRecording);
+  speakerToggle.addEventListener('click', toggleTTS);
 }
 
 // Handle model selection
@@ -187,6 +206,7 @@ chatContainer.scrollTop = chatContainer.scrollHeight;
     }
     
     saveConversation();
+    speakText(fullResponse);
     streamingMessageElement = null;
     pendingContent = null;
     animationFrameId = null;
@@ -308,4 +328,198 @@ function newChat() {
   messageInput.value = '';
   autoResizeInput();
   addMessage('system', 'Welcome to Ollama Chat! Select a model and start chatting.');
+}
+
+// TTS Toggle
+function toggleTTS() {
+  ttsEnabled = !ttsEnabled;
+  speakerToggle.textContent = ttsEnabled ? '🔊' : '🔇';
+  speakerToggle.classList.toggle('enabled', ttsEnabled);
+  
+  // Unlock audio on first interaction
+  if (!audioUnlocked) {
+    const silence = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=");
+    silence.play().then(() => audioUnlocked = true).catch(() => {});
+  }
+}
+
+// Recording functions
+async function startRecording() {
+  // Unlock audio on mic interaction
+  if (!audioUnlocked) {
+    const silence = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=");
+    silence.play().then(() => audioUnlocked = true).catch(() => {});
+  }
+  
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    
+    // Set up audio analysis for silence detection
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioContext.createAnalyser();
+    const source = audioContext.createMediaStreamSource(stream);
+    source.connect(analyser);
+    analyser.fftSize = 512;
+    
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+    
+    mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
+    mediaRecorder.onstop = sendAudioToWhisper;
+    
+    mediaRecorder.start();
+    isRecording = true;
+    micBtn.classList.add('recording');
+    
+    // Start silence detection if in conversation mode
+    if (conversationMode) {
+      detectSilence();
+    }
+  } catch (err) {
+    console.error('Mic access error:', err);
+    alert('Could not access microphone');
+  }
+}
+
+function stopRecording() {
+  console.log('stopRecording called');
+  console.trace();  // Shows what called this function
+  if (mediaRecorder && isRecording) {
+    mediaRecorder.stop();
+    mediaRecorder.stream.getTracks().forEach(track => track.stop());
+    isRecording = false;
+    micBtn.classList.remove('recording');
+    if (silenceTimer) {
+      clearTimeout(silenceTimer);
+      silenceTimer = null;
+    }
+  }
+}
+
+async function sendAudioToWhisper() {
+  const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+  const formData = new FormData();
+  formData.append('audio', audioBlob, 'recording.wav');
+  
+  try {
+    const response = await fetch(STT_URL, {
+      method: 'POST',
+      body: formData
+    });
+    const data = await response.json();
+    if (data.text) {
+      messageInput.value = data.text;
+      sendMessage();
+    }
+  } catch (err) {
+    console.error('STT error:', err);
+  }
+}
+
+async function speakText(text) {
+  if (!ttsEnabled) return;
+  
+  // Clean markdown formatting
+  text = text
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/`(.*?)`/g, '$1')
+    .replace(/#{1,6}\s?/g, '')
+    .replace(/\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  
+  try {
+    const response = await fetch(TTS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text })
+    });
+    const audioBlob = await response.blob();
+    const audioUrl = URL.createObjectURL(audioBlob);
+    const audio = new Audio(audioUrl);
+    
+    audio.onended = () => {
+      if (conversationMode && !isRecording) {
+        startRecording();
+      }
+    };
+    
+    audio.play().catch(e => {
+      const playBtn = document.createElement('button');
+      playBtn.textContent = '▶️ Play Response';
+      playBtn.className = 'play-response-btn';
+      playBtn.onclick = () => {
+        audio.play();
+        playBtn.remove();
+        audioUnlocked = true;
+      };
+      messagesContainer.appendChild(playBtn);
+    });
+  } catch (err) {
+    console.error('TTS error:', err);
+  }
+}
+
+// Silence detection for conversation mode
+function detectSilence() {
+  // Wait 2 seconds before starting silence detection
+  setTimeout(() => {
+  const bufferLength = analyser.fftSize;
+  const dataArray = new Uint8Array(bufferLength);
+  let silenceStart = null;
+  const silenceThreshold = 5;  // Adjust if needed
+  const silenceDuration = 4000; // 4 seconds of silence
+  
+  function checkAudio() {
+    if (!isRecording || !conversationMode) return;
+    
+    analyser.getByteTimeDomainData(dataArray);
+    
+    // Calculate volume
+    let sum = 0;
+    for (let i = 0; i < bufferLength; i++) {
+      const val = (dataArray[i] - 128) / 128;
+      sum += val * val;
+    }
+    const volume = Math.sqrt(sum / bufferLength) * 100;
+    
+    if (volume < silenceThreshold) {
+      if (!silenceStart) silenceStart = Date.now();
+      else if (Date.now() - silenceStart > silenceDuration) {
+        stopRecording();
+        return;
+      }
+    } else {
+      silenceStart = null;
+    }
+    
+    requestAnimationFrame(checkAudio);
+  }
+  
+  checkAudio();
+  }, 2000);
+}
+
+// Toggle conversation mode
+function toggleConversationMode() {
+  conversationMode = !conversationMode;
+  convoModeBtn.classList.toggle('active', conversationMode);
+  convoModeBtn.textContent = conversationMode ? '🗣️' : '💬';
+  
+  // Also enable TTS when entering conversation mode
+  if (conversationMode) {
+    ttsEnabled = true;
+    speakerToggle.textContent = '🔊';
+    speakerToggle.classList.add('enabled');
+    
+    // Unlock audio
+    const silence = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=");
+    silence.play().then(() => audioUnlocked = true).catch(() => {});
+    
+    // Start listening
+    startRecording();
+  } else {
+    stopRecording();
+  }
 }
