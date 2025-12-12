@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ollama Chat Interface</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>AI Chat Interface</h1>
+      <div class="controls">
+        <button id="speakerToggle" class="speaker-btn" title="Toggle voice responses">🔇</button>
+        <select id="providerSelect" class="provider-select">
+          <option value="">Select a provider</option>
+        </select>
+        <select id="modelSelect" class="model-select">
+          <option value="">Select a model</option>
+        </select>
+        <button id="settingsBtn" class="settings-btn" title="Settings">⚙️</button>
+        <button id="newChatBtn" class="new-chat-btn">New Chat</button>
+      </div>
+    </div>
+    
+    <div id="chatContainer" class="chat-container">
+      <div id="messages" class="messages"></div>
+      <div id="typingIndicator" class="typing-indicator" style="display: none;">
+        <div class="typing-dot"></div>
+        <div class="typing-dot"></div>
+        <div class="typing-dot"></div>
+      </div>
+    </div>
+    
+    <div class="input-area">
+      <textarea id="messageInput" class="message-input" placeholder="Type your message..." rows="1"></textarea>
+      <button id="micBtn" class="mic-btn" title="Hold to talk">🎤</button>
+      <button id="convoModeBtn" class="convo-btn" title="Toggle conversation mode">💬</button>
+      <button id="sendBtn" class="send-btn">Send</button>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settingsModal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button id="closeModal" class="close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-section">
+          <h3>API Keys</h3>
+          <p class="settings-hint">API keys are stored locally in your browser</p>
+
+          <div class="setting-item">
+            <label for="claudeApiKey">Claude API Key</label>
+            <div class="api-key-input-wrapper">
+              <input type="password" id="claudeApiKey" class="api-key-input" placeholder="sk-ant-...">
+              <button class="toggle-visibility-btn" data-target="claudeApiKey">👁️</button>
+            </div>
+          </div>
+
+          <div class="setting-item">
+            <label for="grokApiKey">Grok API Key</label>
+            <div class="api-key-input-wrapper">
+              <input type="password" id="grokApiKey" class="api-key-input" placeholder="xai-...">
+              <button class="toggle-visibility-btn" data-target="grokApiKey">👁️</button>
+            </div>
+          </div>
+
+          <div class="setting-item">
+            <label for="ollamaHost">Ollama Host (optional)</label>
+            <input type="text" id="ollamaHost" class="api-key-input" placeholder="http://localhost:11434">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="saveSettings" class="save-btn">Save</button>
+      </div>
+    </div>
+  </div>
+
+    <script>document.write('<script src="script.js?v=' + Date.now() + '"><\/script>');</script>
+</body>
+</html>
