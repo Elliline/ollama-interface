@@ -151,9 +151,11 @@ const PROVIDERS = {
     name: 'Claude',
     available: !!CLAUDE_API_KEY,
     models: [
+      { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5 (Flagship)' },
+      { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5' },
+      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 (Fast)' },
       { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4' },
-      { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku' },
-      { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus' }
+      { id: 'claude-opus-4-20250514', name: 'Claude Opus 4' }
     ]
   },
   grok: {
@@ -161,9 +163,16 @@ const PROVIDERS = {
     name: 'Grok',
     available: !!GROK_API_KEY,
     models: [
-      { id: 'grok-3', name: 'Grok 3' },
-      { id: 'grok-3-mini', name: 'Grok 3 Mini' },
-      { id: 'grok-2', name: 'Grok 2' }
+      { id: 'grok-4-1-fast-reasoning', name: 'Grok 4.1 Fast Reasoning (2M)' },
+      { id: 'grok-4-1-fast-non-reasoning', name: 'Grok 4.1 Fast Non-Reasoning (2M)' },
+      { id: 'grok-code-fast-1', name: 'Grok Code Fast 1 (256K)' },
+      { id: 'grok-4-fast-reasoning', name: 'Grok 4 Fast Reasoning (2M)' },
+      { id: 'grok-4-fast-non-reasoning', name: 'Grok 4 Fast Non-Reasoning (2M)' },
+      { id: 'grok-4-0709', name: 'Grok 4 (256K)' },
+      { id: 'grok-3-mini', name: 'Grok 3 Mini (131K)' },
+      { id: 'grok-3', name: 'Grok 3 (131K)' },
+      { id: 'grok-2-vision-1212', name: 'Grok 2 Vision (32K)' },
+      { id: 'grok-2-image-1212', name: 'Grok 2 Image Gen' }
     ]
   }
 };
