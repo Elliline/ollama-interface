@@ -40,14 +40,21 @@ let audioContext = null;
 let analyser = null;
 let audioUnlocked = false;
 const TTS_URL = '/api/tts';
-const STT_URL = '/api/stt';   
+const STT_URL = '/api/stt';
+
+// Conversation history state
+let currentConversationId = null;
+let conversations = [];
+let sidebarCollapsed = false;   
 
 // Initialize the app
 document.addEventListener('DOMContentLoaded', () => {
   loadProviders();
-  loadConversation();
+  loadConversations();
   setupEventListeners();
+  setupSidebarListeners();
   loadSettings();
+  checkMobileView();
 });
 
 // Load available providers
@@ -55,11 +62,12 @@ async function loadProviders() {
   try {
     const hasClaudeKey = !!localStorage.getItem('claudeApiKey');
     const hasGrokKey = !!localStorage.getItem('grokApiKey');
+    const hasOpenAIKey = !!localStorage.getItem('openaiApiKey');
 
     const response = await fetch('/api/providers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ hasClaudeKey, hasGrokKey })
+      body: JSON.stringify({ hasClaudeKey, hasGrokKey, hasOpenAIKey })
     });
 
     if (!response.ok) {
@@ -73,7 +81,11 @@ async function loadProviders() {
     providers.forEach(provider => {
       const option = document.createElement('option');
       option.value = provider.id;
-      option.textContent = provider.name;
+      // Add visual indicator if API key is missing for providers that require it
+      const needsKey = provider.requiresKey && !provider.hasKey;
+      option.textContent = needsKey ? `${provider.name} (API key required)` : provider.name;
+      option.dataset.requiresKey = provider.requiresKey;
+      option.dataset.hasKey = provider.hasKey;
       providerSelect.appendChild(option);
     });
 
@@ -98,6 +110,13 @@ async function loadModelsForProvider(providerId) {
     const provider = providers.find(p => p.id === providerId);
     if (!provider) return;
 
+    // Check if API key is required but missing
+    if (provider.requiresKey && !provider.hasKey) {
+      const keyName = providerId === 'claude' ? 'Claude' : providerId === 'openai' ? 'OpenAI' : 'Grok';
+      addMessage('system', `${keyName} requires an API key. Click the ⚙️ Settings button to add your API key.`);
+      return;
+    }
+
     if (providerId === 'ollama') {
       // Fetch Ollama models dynamically
       const ollamaHost = localStorage.getItem('ollamaHost') || undefined;
@@ -120,6 +139,45 @@ async function loadModelsForProvider(providerId) {
         option.textContent = model.name;
         modelSelect.appendChild(option);
       });
+    } else if (providerId === 'openai') {
+      // Fetch OpenAI models dynamically
+      const apiKey = localStorage.getItem('openaiApiKey');
+      const response = await fetch('/api/openai/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch OpenAI models');
+      }
+
+      const data = await response.json();
+      const models = data.models || [];
+
+      models.forEach(model => {
+        const option = document.createElement('option');
+        option.value = model.id;
+        option.textContent = model.name;
+        modelSelect.appendChild(option);
+      });
+    } else if (providerId === 'squatchserve') {
+      // Fetch SquatchServe models dynamically
+      const response = await fetch('/api/squatchserve/models');
+
+      if (!response.ok) {
+        throw new Error('SquatchServe not available');
+      }
+
+      const data = await response.json();
+      const models = data.models || [];
+
+      models.forEach(model => {
+        const option = document.createElement('option');
+        option.value = model.id;
+        option.textContent = model.name;
+        modelSelect.appendChild(option);
+      });
     } else {
       // Use pre-defined models for Claude and Grok
       provider.models.forEach(model => {
@@ -138,7 +196,10 @@ async function loadModelsForProvider(providerId) {
     }
   } catch (error) {
     console.error('Error loading models:', error);
-    addMessage('error', `Failed to load models for ${providerId}. ${providerId === 'ollama' ? 'Make sure Ollama is running.' : 'Check your API key in settings.'}`);
+    const errorHint = providerId === 'ollama' ? 'Make sure Ollama is running.' :
+                      providerId === 'squatchserve' ? 'Make sure SquatchServe is running on localhost:8001.' :
+                      'Check your API key in settings.';
+    addMessage('error', `Failed to load models for ${providerId}. ${errorHint}`);
   }
 }
 
@@ -247,52 +308,28 @@ async function sendMessage() {
         content: msg.content
       }));
 
-    if (currentProvider === 'ollama') {
-      // Send to Ollama
-      const ollamaHost = localStorage.getItem('ollamaHost') || undefined;
-      response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: currentModel,
-          messages: conversationMessages,
-          stream: true,
-          ollamaHost
-        })
-      });
-    } else if (currentProvider === 'claude') {
-      // Send to Claude
-      const apiKey = localStorage.getItem('claudeApiKey');
-      if (!apiKey) {
-        throw new Error('Claude API key not found. Please add it in settings.');
-      }
-      response = await fetch('/api/claude/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: currentModel,
-          messages: conversationMessages,
-          apiKey
-        })
-      });
-    } else if (currentProvider === 'grok') {
-      // Send to Grok
-      const apiKey = localStorage.getItem('grokApiKey');
-      if (!apiKey) {
-        throw new Error('Grok API key not found. Please add it in settings.');
-      }
-      response = await fetch('/api/grok/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: currentModel,
-          messages: conversationMessages,
-          apiKey
-        })
-      });
-    } else {
-      throw new Error('Unknown provider selected');
-    }
+    // Use memory-enhanced chat endpoint
+    const ollamaHost = localStorage.getItem('ollamaHost') || undefined;
+    const apiKey = currentProvider === 'claude'
+      ? localStorage.getItem('claudeApiKey')
+      : currentProvider === 'openai'
+        ? localStorage.getItem('openaiApiKey')
+        : currentProvider === 'grok'
+          ? localStorage.getItem('grokApiKey')
+          : undefined;
+
+    response = await fetch('/api/chat/memory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: currentModel,
+        messages: conversationMessages,
+        provider: currentProvider,
+        conversation_id: currentConversationId,
+        ollamaHost,
+        apiKey
+      })
+    });
 
     // SECURITY FIX: Check if response exists before accessing properties
     if (!response) {
@@ -302,6 +339,19 @@ async function sendMessage() {
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
       throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+    }
+
+    // Get conversation ID from response headers
+    const newConversationId = response.headers.get('X-Conversation-Id');
+    const hasMemoryContext = response.headers.get('X-Has-Memory-Context') === 'true';
+
+    if (newConversationId && !currentConversationId) {
+      currentConversationId = newConversationId;
+    }
+
+    // Show memory context indicator if applicable
+    if (hasMemoryContext) {
+      showMemoryIndicator();
     }
 
     // Handle streaming response
@@ -326,21 +376,39 @@ async function sendMessage() {
       fullResponse = await processOllamaStream(response);
     } else if (currentProvider === 'claude') {
       fullResponse = await processClaudeStream(response);
-    } else if (currentProvider === 'grok') {
+    } else if (currentProvider === 'grok' || currentProvider === 'openai' || currentProvider === 'squatchserve') {
+      // Grok, OpenAI, and SquatchServe use the same OpenAI-compatible streaming format
       fullResponse = await processGrokStream(response);
     }
 
     // Update the assistant message with the complete response
+    console.log('[sendMessage] Stream complete, fullResponse length:', fullResponse.length);
     const assistantMessageIndex = conversation.findIndex(msg => msg.id === assistantMessageId);
     if (assistantMessageIndex !== -1) {
       conversation[assistantMessageIndex].content = fullResponse;
+      console.log('[sendMessage] Updated conversation at index:', assistantMessageIndex);
     }
 
-    saveConversation();
-    speakText(fullResponse);
+    // Cancel any pending animation frame to avoid stale updates
+    if (animationFrameId) {
+      cancelAnimationFrame(animationFrameId);
+    }
+
+    // Clear streaming state BEFORE re-rendering
     streamingMessageElement = null;
     pendingContent = null;
     animationFrameId = null;
+
+    saveConversation();
+
+    // Force re-render to ensure UI matches conversation state
+    // This guarantees the response is displayed even if streaming updates failed
+    renderMessages();
+
+    speakText(fullResponse);
+
+    // Refresh conversation list to show the new/updated conversation
+    loadConversations();
 
   } catch (error) {
     console.error('Error sending message:', error);
@@ -348,6 +416,19 @@ async function sendMessage() {
   } finally {
     hideTypingIndicator();
   }
+}
+
+// Show memory context indicator
+function showMemoryIndicator() {
+  const indicator = document.createElement('div');
+  indicator.className = 'memory-context-indicator';
+  indicator.textContent = 'Using context from previous conversations';
+  messagesContainer.appendChild(indicator);
+
+  // Remove after a few seconds
+  setTimeout(() => {
+    indicator.remove();
+  }, 5000);
 }
 
 // Process Ollama streaming response
@@ -440,6 +521,24 @@ async function processClaudeStream(response) {
         }
       }
     }
+
+    // Process any remaining buffered content (handles missing trailing newline)
+    if (buffer.trim()) {
+      if (buffer.startsWith('data: ')) {
+        const data = buffer.slice(6);
+        if (data !== '[DONE]') {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+              fullResponse += parsed.delta.text;
+              updateLastMessage(fullResponse);
+            }
+          } catch (e) {
+            console.error('Error parsing final Claude SSE:', e);
+          }
+        }
+      }
+    }
   } finally {
     // SECURITY FIX: Always release the reader lock
     reader.releaseLock();
@@ -454,39 +553,128 @@ async function processGrokStream(response) {
   const decoder = new TextDecoder();
   let fullResponse = '';
   let buffer = ''; // Buffer for partial lines across chunks
+  let chunkCount = 0;
+
+  console.log('[processGrokStream] Starting stream processing');
 
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        console.log('[processGrokStream] Stream done, chunks received:', chunkCount);
+        break;
+      }
 
+      chunkCount++;
       // SECURITY FIX: Use stream:true to handle partial UTF-8 sequences
       buffer += decoder.decode(value, { stream: true });
+
+      // Log first chunk to see the format
+      if (chunkCount === 1) {
+        console.log('[processGrokStream] First chunk:', buffer.substring(0, 200));
+      }
+
       const lines = buffer.split('\n');
 
       // Keep the last incomplete line in buffer
       buffer = lines.pop() || '';
 
       for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6);
-          if (data === '[DONE]') continue;
+        const trimmedLine = line.trim();
+        if (!trimmedLine || trimmedLine === 'data: [DONE]') continue;
 
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.choices?.[0]?.delta?.content) {
-              fullResponse += parsed.choices[0].delta.content;
-              updateLastMessage(fullResponse);
-            }
-          } catch (e) {
-            console.error('Error parsing Grok SSE:', e);
+        let jsonStr = trimmedLine;
+
+        // Handle SSE format (data: {...})
+        if (trimmedLine.startsWith('data: ')) {
+          jsonStr = trimmedLine.slice(6);
+          if (jsonStr === '[DONE]') continue;
+        }
+
+        try {
+          const parsed = JSON.parse(jsonStr);
+          let content = null;
+
+          // OpenAI-compatible streaming format (delta)
+          if (parsed.choices?.[0]?.delta?.content) {
+            content = parsed.choices[0].delta.content;
           }
+          // Non-streaming format (message instead of delta)
+          else if (parsed.choices?.[0]?.message?.content) {
+            content = parsed.choices[0].message.content;
+          }
+          // Ollama format
+          else if (parsed.message?.content) {
+            content = parsed.message.content;
+          }
+          // Direct content field
+          else if (parsed.content) {
+            content = parsed.content;
+          }
+          // Direct text field
+          else if (parsed.text) {
+            content = parsed.text;
+          }
+          // Response field (some providers use this)
+          else if (parsed.response) {
+            content = parsed.response;
+          }
+
+          if (content) {
+            fullResponse += content;
+            updateLastMessage(fullResponse);
+          }
+        } catch (e) {
+          // Not valid JSON, skip this line
+        }
+      }
+    }
+
+    // Process any remaining buffered content (handles missing trailing newline)
+    if (buffer.trim()) {
+      let jsonStr = buffer.trim();
+
+      // Handle SSE format
+      if (jsonStr.startsWith('data: ')) {
+        jsonStr = jsonStr.slice(6);
+      }
+
+      if (jsonStr && jsonStr !== '[DONE]') {
+        try {
+          const parsed = JSON.parse(jsonStr);
+          let content = null;
+
+          if (parsed.choices?.[0]?.delta?.content) {
+            content = parsed.choices[0].delta.content;
+          } else if (parsed.choices?.[0]?.message?.content) {
+            content = parsed.choices[0].message.content;
+          } else if (parsed.message?.content) {
+            content = parsed.message.content;
+          } else if (parsed.content) {
+            content = parsed.content;
+          } else if (parsed.text) {
+            content = parsed.text;
+          } else if (parsed.response) {
+            content = parsed.response;
+          }
+
+          if (content) {
+            fullResponse += content;
+            updateLastMessage(fullResponse);
+          }
+        } catch (e) {
+          // Not valid JSON, ignore
         }
       }
     }
   } finally {
     // SECURITY FIX: Always release the reader lock
     reader.releaseLock();
+  }
+
+  console.log('[processGrokStream] Final response length:', fullResponse.length);
+  if (fullResponse.length === 0) {
+    console.log('[processGrokStream] WARNING: No content extracted! Remaining buffer:', buffer);
   }
 
   return fullResponse;
@@ -595,13 +783,7 @@ function hideTypingIndicator() {
 
 // Start a new chat
 function newChat() {
-  conversation = [];
-  lastAssistantMessageId = null;
-  sessionStorage.removeItem('ollamaChatConversation');
-  renderMessages();
-  messageInput.value = '';
-  autoResizeInput();
-  addMessage('system', 'Welcome to Ollama Chat! Select a model and start chatting.');
+  startNewConversation();
 }
 
 // TTS Toggle
@@ -827,16 +1009,19 @@ function closeSettings() {
 
 function loadSettings() {
   const claudeKey = localStorage.getItem('claudeApiKey') || '';
+  const openaiKey = localStorage.getItem('openaiApiKey') || '';
   const grokKey = localStorage.getItem('grokApiKey') || '';
   const ollamaHost = localStorage.getItem('ollamaHost') || '';
 
   document.getElementById('claudeApiKey').value = claudeKey;
+  document.getElementById('openaiApiKey').value = openaiKey;
   document.getElementById('grokApiKey').value = grokKey;
   document.getElementById('ollamaHost').value = ollamaHost;
 }
 
 async function saveSettingsHandler() {
   const claudeKey = document.getElementById('claudeApiKey').value.trim();
+  const openaiKey = document.getElementById('openaiApiKey').value.trim();
   const grokKey = document.getElementById('grokApiKey').value.trim();
   const ollamaHost = document.getElementById('ollamaHost').value.trim();
 
@@ -845,6 +1030,12 @@ async function saveSettingsHandler() {
     localStorage.setItem('claudeApiKey', claudeKey);
   } else {
     localStorage.removeItem('claudeApiKey');
+  }
+
+  if (openaiKey) {
+    localStorage.setItem('openaiApiKey', openaiKey);
+  } else {
+    localStorage.removeItem('openaiApiKey');
   }
 
   if (grokKey) {
@@ -879,5 +1070,269 @@ function togglePasswordVisibility(event) {
   } else {
     input.type = 'password';
     button.textContent = '👁️';
+  }
+}
+
+// ============ Conversation History Functions ============
+
+// DOM elements for sidebar
+const sidebar = document.getElementById('sidebar');
+const sidebarToggle = document.getElementById('sidebar-toggle');
+const sidebarNewChatBtn = document.getElementById('sidebar-new-chat-btn');
+const conversationList = document.getElementById('conversation-list');
+const sidebarOverlay = document.getElementById('sidebar-overlay');
+const mainContent = document.querySelector('.main-content');
+
+// Set up sidebar event listeners
+function setupSidebarListeners() {
+  if (sidebarToggle) {
+    sidebarToggle.addEventListener('click', toggleSidebar);
+  }
+  if (sidebarNewChatBtn) {
+    sidebarNewChatBtn.addEventListener('click', startNewConversation);
+  }
+  if (sidebarOverlay) {
+    sidebarOverlay.addEventListener('click', closeSidebarOnMobile);
+  }
+
+  // Handle window resize
+  window.addEventListener('resize', checkMobileView);
+}
+
+// Check if we're on mobile and adjust sidebar
+function checkMobileView() {
+  if (window.innerWidth <= 768) {
+    sidebar?.classList.add('collapsed');
+    mainContent?.classList.add('sidebar-collapsed');
+  }
+}
+
+// Toggle sidebar visibility
+function toggleSidebar() {
+  if (window.innerWidth <= 768) {
+    sidebar?.classList.toggle('open');
+    sidebarOverlay?.classList.toggle('active');
+  } else {
+    sidebar?.classList.toggle('collapsed');
+    mainContent?.classList.toggle('sidebar-collapsed');
+    sidebarCollapsed = !sidebarCollapsed;
+    localStorage.setItem('sidebarCollapsed', sidebarCollapsed);
+  }
+}
+
+// Close sidebar on mobile when clicking overlay
+function closeSidebarOnMobile() {
+  sidebar?.classList.remove('open');
+  sidebarOverlay?.classList.remove('active');
+}
+
+// Load all conversations from the server
+async function loadConversations() {
+  try {
+    const response = await fetch('/api/conversations');
+    if (!response.ok) {
+      throw new Error('Failed to load conversations');
+    }
+    conversations = await response.json();
+    renderConversationList();
+
+    // If no current conversation, show welcome message
+    if (!currentConversationId) {
+      loadConversation(); // Load from session storage or show welcome
+    }
+  } catch (error) {
+    console.error('Error loading conversations:', error);
+    // Fall back to local session storage
+    loadConversation();
+  }
+}
+
+// Render the conversation list in the sidebar
+function renderConversationList() {
+  if (!conversationList) return;
+
+  if (conversations.length === 0) {
+    conversationList.innerHTML = '<div class="conversation-list-empty">No conversations yet.<br>Start a new chat!</div>';
+    return;
+  }
+
+  conversationList.innerHTML = conversations.map(conv => {
+    const isActive = conv.id === currentConversationId;
+    const title = conv.title || 'New Conversation';
+    const preview = conv.preview ? conv.preview.substring(0, 40) + '...' : '';
+    const timestamp = formatRelativeTime(conv.updated_at);
+    const model = conv.model_used ? conv.model_used.split(':')[0] : '';
+
+    return `
+      <div class="conversation-item ${isActive ? 'active' : ''}" data-id="${conv.id}">
+        <div class="conversation-title">${escapeHtml(title)}</div>
+        <div class="conversation-meta">
+          <span class="conversation-timestamp">${timestamp}</span>
+          ${model ? `<span class="conversation-model">${escapeHtml(model)}</span>` : ''}
+        </div>
+        <div class="conversation-actions">
+          <button class="conversation-action-btn rename" title="Rename" data-id="${conv.id}">✏️</button>
+          <button class="conversation-action-btn delete" title="Delete" data-id="${conv.id}">🗑️</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Add click handlers
+  conversationList.querySelectorAll('.conversation-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+      if (!e.target.closest('.conversation-action-btn')) {
+        loadConversationById(item.dataset.id);
+      }
+    });
+  });
+
+  // Add action button handlers
+  conversationList.querySelectorAll('.conversation-action-btn.rename').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      renameConversation(btn.dataset.id);
+    });
+  });
+
+  conversationList.querySelectorAll('.conversation-action-btn.delete').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteConversation(btn.dataset.id);
+    });
+  });
+}
+
+// Format relative time (e.g., "2 hours ago", "Yesterday")
+function formatRelativeTime(dateString) {
+  if (!dateString) return '';
+
+  const date = new Date(dateString);
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 1) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) return `${diffDays}d ago`;
+
+  return date.toLocaleDateString();
+}
+
+// Load a specific conversation by ID
+async function loadConversationById(id) {
+  try {
+    const response = await fetch(`/api/conversations/${id}`);
+    if (!response.ok) {
+      throw new Error('Failed to load conversation');
+    }
+
+    const data = await response.json();
+    currentConversationId = id;
+
+    // Convert messages to our format
+    conversation = data.messages.map(msg => ({
+      role: msg.role,
+      content: msg.content,
+      id: msg.id
+    }));
+
+    // Update model if stored
+    if (data.model_used && modelSelect) {
+      const modelName = data.model_used;
+      // Try to find and select the model
+      const option = Array.from(modelSelect.options).find(opt => opt.value === modelName);
+      if (option) {
+        modelSelect.value = modelName;
+        currentModel = modelName;
+      }
+    }
+
+    renderMessages();
+    renderConversationList(); // Update active state
+    closeSidebarOnMobile();
+
+  } catch (error) {
+    console.error('Error loading conversation:', error);
+    addMessage('error', 'Failed to load conversation');
+  }
+}
+
+// Start a new conversation
+function startNewConversation() {
+  currentConversationId = null;
+  conversation = [];
+  lastAssistantMessageId = null;
+  sessionStorage.removeItem('ollamaChatConversation');
+  renderMessages();
+  renderConversationList();
+  messageInput.value = '';
+  autoResizeInput();
+  addMessage('system', 'Welcome! Start a new conversation.');
+  closeSidebarOnMobile();
+}
+
+// Rename a conversation
+async function renameConversation(id) {
+  const conv = conversations.find(c => c.id === id);
+  const currentTitle = conv?.title || 'New Conversation';
+  const newTitle = prompt('Enter new title:', currentTitle);
+
+  if (newTitle && newTitle.trim() !== currentTitle) {
+    try {
+      const response = await fetch(`/api/conversations/${id}/title`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTitle.trim() })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to rename conversation');
+      }
+
+      // Update local state and re-render
+      const idx = conversations.findIndex(c => c.id === id);
+      if (idx !== -1) {
+        conversations[idx].title = newTitle.trim();
+        renderConversationList();
+      }
+    } catch (error) {
+      console.error('Error renaming conversation:', error);
+      alert('Failed to rename conversation');
+    }
+  }
+}
+
+// Delete a conversation
+async function deleteConversation(id) {
+  if (!confirm('Are you sure you want to delete this conversation?')) {
+    return;
+  }
+
+  try {
+    const response = await fetch(`/api/conversations/${id}`, {
+      method: 'DELETE'
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to delete conversation');
+    }
+
+    // Remove from local state
+    conversations = conversations.filter(c => c.id !== id);
+
+    // If deleted current conversation, start new one
+    if (id === currentConversationId) {
+      startNewConversation();
+    } else {
+      renderConversationList();
+    }
+  } catch (error) {
+    console.error('Error deleting conversation:', error);
+    alert('Failed to delete conversation');
   }
 }

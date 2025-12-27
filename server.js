@@ -1,6 +1,7 @@
 /**
  * Express backend proxy server for Ollama Chat Interface
  * Handles API key management securely via environment variables
+ * Now with conversation history and semantic memory
  */
 
 require('dotenv').config();
@@ -9,7 +10,16 @@ const express = require('express');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
 
+// Database modules
+const db = require('./db/database');
+
+// Routes
+const conversationsRouter = require('./routes/conversations');
+
 const app = express();
+
+// Trust proxy for rate limiting behind reverse proxy (Nginx, Cloudflare, etc.)
+app.set('trust proxy', 1);
 
 // Configuration from environment
 const PORT = process.env.PORT || 3000;
@@ -73,6 +83,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // Apply rate limiting to API routes
 app.use('/api/', apiLimiter);
+
+// Mount conversation routes
+app.use('/api/conversations', conversationsRouter);
 
 // ============ Security Validation Functions ============
 
@@ -138,18 +151,21 @@ function isValidMessageArray(messages) {
   });
 }
 
-// Provider configuration
+// Configuration from environment (OpenAI)
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+
+// Provider configuration - all providers always visible, API key checked at usage time
 const PROVIDERS = {
   ollama: {
     id: 'ollama',
     name: 'Ollama (Local)',
-    available: true, // Always available if Ollama is running
+    requiresKey: false,
     models: [] // Dynamically loaded
   },
   claude: {
     id: 'claude',
     name: 'Claude',
-    available: !!CLAUDE_API_KEY,
+    requiresKey: true,
     models: [
       { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5 (Flagship)' },
       { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5' },
@@ -158,10 +174,16 @@ const PROVIDERS = {
       { id: 'claude-opus-4-20250514', name: 'Claude Opus 4' }
     ]
   },
+  openai: {
+    id: 'openai',
+    name: 'OpenAI',
+    requiresKey: true,
+    models: [] // Dynamically loaded from API
+  },
   grok: {
     id: 'grok',
     name: 'Grok',
-    available: !!GROK_API_KEY,
+    requiresKey: true,
     models: [
       { id: 'grok-4-1-fast-reasoning', name: 'Grok 4.1 Fast Reasoning (2M)' },
       { id: 'grok-4-1-fast-non-reasoning', name: 'Grok 4.1 Fast Non-Reasoning (2M)' },
@@ -174,54 +196,74 @@ const PROVIDERS = {
       { id: 'grok-2-vision-1212', name: 'Grok 2 Vision (32K)' },
       { id: 'grok-2-image-1212', name: 'Grok 2 Image Gen' }
     ]
+  },
+  squatchserve: {
+    id: 'squatchserve',
+    name: 'SquatchServe (Local)',
+    requiresKey: false,
+    models: [] // Dynamically loaded from localhost:8001
   }
 };
 
 // ============ Provider Endpoints ============
 
-// Get available providers (POST to receive client API key status)
+// Get available providers - always return all providers
+// API key validation happens at usage time, not listing time
 app.post('/api/providers', (req, res) => {
-  const { hasClaudeKey, hasGrokKey } = req.body;
+  const { hasClaudeKey, hasGrokKey, hasOpenAIKey } = req.body;
 
-  const availableProviders = [];
-
-  // Ollama is always available (if running)
-  availableProviders.push({
-    id: PROVIDERS.ollama.id,
-    name: PROVIDERS.ollama.name,
-    models: []
-  });
-
-  // Claude is available if server has key OR client has key
-  if (CLAUDE_API_KEY || hasClaudeKey) {
-    availableProviders.push({
+  // Return all providers - they're always visible
+  // Include info about whether keys are configured (server or client)
+  const availableProviders = [
+    {
+      id: PROVIDERS.ollama.id,
+      name: PROVIDERS.ollama.name,
+      requiresKey: false,
+      hasKey: true, // Ollama doesn't need a key
+      models: []
+    },
+    {
       id: PROVIDERS.claude.id,
       name: PROVIDERS.claude.name,
+      requiresKey: true,
+      hasKey: !!(CLAUDE_API_KEY || hasClaudeKey),
       models: PROVIDERS.claude.models
-    });
-  }
-
-  // Grok is available if server has key OR client has key
-  if (GROK_API_KEY || hasGrokKey) {
-    availableProviders.push({
+    },
+    {
+      id: PROVIDERS.openai.id,
+      name: PROVIDERS.openai.name,
+      requiresKey: true,
+      hasKey: !!(OPENAI_API_KEY || hasOpenAIKey),
+      models: [] // Loaded dynamically
+    },
+    {
       id: PROVIDERS.grok.id,
       name: PROVIDERS.grok.name,
+      requiresKey: true,
+      hasKey: !!(GROK_API_KEY || hasGrokKey),
       models: PROVIDERS.grok.models
-    });
-  }
+    },
+    {
+      id: PROVIDERS.squatchserve.id,
+      name: PROVIDERS.squatchserve.name,
+      requiresKey: false,
+      hasKey: true, // SquatchServe doesn't need a key
+      models: [] // Loaded dynamically
+    }
+  ];
 
   res.json({ providers: availableProviders });
 });
 
 // Legacy GET endpoint for backwards compatibility
 app.get('/api/providers', (req, res) => {
-  const availableProviders = Object.values(PROVIDERS)
-    .filter(p => p.available)
-    .map(p => ({
-      id: p.id,
-      name: p.name,
-      models: p.id === 'ollama' ? [] : p.models
-    }));
+  const availableProviders = Object.values(PROVIDERS).map(p => ({
+    id: p.id,
+    name: p.name,
+    requiresKey: p.requiresKey,
+    hasKey: p.id === 'ollama' || p.id === 'squatchserve' ? true : false, // Can't know client keys in GET
+    models: ['ollama', 'openai', 'squatchserve'].includes(p.id) ? [] : p.models
+  }));
   res.json({ providers: availableProviders });
 });
 
@@ -468,6 +510,282 @@ app.post('/api/grok/chat', chatLimiter, async (req, res) => {
   }
 });
 
+// ============ OpenAI API Proxy ============
+
+// Fetch OpenAI models dynamically
+app.post('/api/openai/models', async (req, res) => {
+  const { apiKey } = req.body;
+  const openaiKey = apiKey || OPENAI_API_KEY;
+
+  if (!openaiKey) {
+    return res.status(401).json({ error: 'OpenAI API key not configured' });
+  }
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/models', {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${openaiKey}`
+      }
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error('OpenAI models error:', error);
+      return res.status(response.status).json({ error: 'Failed to fetch OpenAI models' });
+    }
+
+    const data = await response.json();
+
+    // Filter and format models - exclude legacy/deprecated models (3.5 and older)
+    // Keep chat-capable models (gpt-4+, o1+, o3+, chatgpt-*)
+    const chatModels = data.data
+      .filter(model => {
+        const id = model.id.toLowerCase();
+        // Exclude legacy/deprecated models
+        if (id.includes('gpt-3.5') || id.includes('gpt-3') || id.includes('davinci') ||
+            id.includes('curie') || id.includes('babbage') || id.includes('ada') ||
+            id.includes('text-') || id.includes('code-') || id.includes('instruct') ||
+            id.includes('whisper') || id.includes('tts') || id.includes('dall-e') ||
+            id.includes('embedding') || id.includes('moderation')) {
+          return false;
+        }
+        // Include modern chat models (gpt-4, gpt-5, gpt-6, etc., o1, o3, o4, etc.)
+        return id.startsWith('gpt-4') || id.startsWith('gpt-5') || id.startsWith('gpt-6') ||
+               id.startsWith('gpt-7') || id.startsWith('o1') || id.startsWith('o3') ||
+               id.startsWith('o4') || id.startsWith('chatgpt-');
+      })
+      .map(model => ({
+        id: model.id,
+        name: formatOpenAIModelName(model.id)
+      }))
+      .sort((a, b) => {
+        // Sort by preference: newest/best first
+        // o4 > o3 > o1 > gpt-5+ > gpt-4o > gpt-4 > chatgpt
+        const order = ['o4', 'o3', 'o1', 'gpt-7', 'gpt-6', 'gpt-5', 'gpt-4o', 'gpt-4', 'chatgpt'];
+        const aPrefix = order.findIndex(p => a.id.startsWith(p));
+        const bPrefix = order.findIndex(p => b.id.startsWith(p));
+        if (aPrefix !== -1 && bPrefix !== -1 && aPrefix !== bPrefix) return aPrefix - bPrefix;
+        if (aPrefix !== -1 && bPrefix === -1) return -1;
+        if (aPrefix === -1 && bPrefix !== -1) return 1;
+        return a.id.localeCompare(b.id);
+      });
+
+    res.json({ models: chatModels });
+  } catch (error) {
+    console.error('OpenAI models proxy error:', error.message);
+    res.status(500).json({ error: 'Failed to connect to OpenAI API' });
+  }
+});
+
+// Helper to format OpenAI model names nicely
+function formatOpenAIModelName(modelId) {
+  const nameMap = {
+    // GPT-4 series
+    'gpt-4o': 'GPT-4o',
+    'gpt-4o-mini': 'GPT-4o Mini',
+    'gpt-4-turbo': 'GPT-4 Turbo',
+    'gpt-4': 'GPT-4',
+    // GPT-5 series
+    'gpt-5': 'GPT-5',
+    'gpt-5.0': 'GPT-5.0',
+    'gpt-5.2': 'GPT-5.2',
+    'gpt-5-turbo': 'GPT-5 Turbo',
+    // Reasoning models
+    'o1': 'o1 (Reasoning)',
+    'o1-mini': 'o1 Mini',
+    'o1-preview': 'o1 Preview',
+    'o1-pro': 'o1 Pro',
+    'o3': 'o3 (Reasoning)',
+    'o3-mini': 'o3 Mini',
+    'o3-pro': 'o3 Pro',
+    'o4-mini': 'o4 Mini',
+    // ChatGPT
+    'chatgpt-4o-latest': 'ChatGPT-4o Latest'
+  };
+
+  // Check for exact match first
+  if (nameMap[modelId]) return nameMap[modelId];
+
+  // Check for prefix match
+  for (const [prefix, name] of Object.entries(nameMap)) {
+    if (modelId.startsWith(prefix + '-')) {
+      return `${name.split(' (')[0]} (${modelId})`;
+    }
+  }
+
+  // Default: clean up and format nicely
+  // Handle patterns like gpt-5.2-turbo, o3-mini-2024-01-01, etc.
+  return modelId
+    .replace(/^gpt-/, 'GPT-')
+    .replace(/^o(\d)/, 'o$1')
+    .replace(/-(\d{4}-\d{2}-\d{2})$/, ' ($1)')  // Date suffixes
+    .replace(/-/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// OpenAI chat endpoint
+app.post('/api/openai/chat', chatLimiter, async (req, res) => {
+  const { model, messages, apiKey } = req.body;
+
+  // SECURITY: Validate inputs
+  if (!isValidModelName(model)) {
+    return res.status(400).json({ error: 'Invalid model name' });
+  }
+
+  if (!isValidMessageArray(messages)) {
+    return res.status(400).json({ error: 'Invalid messages array' });
+  }
+
+  // Use client key if provided, otherwise fall back to server key
+  const openaiKey = apiKey || OPENAI_API_KEY;
+
+  if (!openaiKey) {
+    return res.status(401).json({ error: 'OpenAI API key not configured' });
+  }
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${openaiKey}`
+      },
+      body: JSON.stringify({
+        model: model,
+        stream: true,
+        messages: messages
+      })
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error('OpenAI API error:', error);
+      return res.status(response.status).json({ error: 'OpenAI API error' });
+    }
+
+    // Stream SSE response
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        res.write(chunk);
+      }
+      res.end();
+    } finally {
+      reader.releaseLock();
+    }
+  } catch (error) {
+    console.error('OpenAI proxy error:', error.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to connect to OpenAI API' });
+    }
+  }
+});
+
+// ============ SquatchServe API Proxy ============
+
+const SQUATCHSERVE_HOST = process.env.SQUATCHSERVE_HOST || 'http://localhost:8001';
+
+// Fetch SquatchServe models dynamically (OpenAI-compatible API)
+app.get('/api/squatchserve/models', async (req, res) => {
+  try {
+    const response = await fetch(`${SQUATCHSERVE_HOST}/v1/models`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error('SquatchServe models error:', error);
+      return res.status(response.status).json({ error: 'Failed to fetch SquatchServe models' });
+    }
+
+    const data = await response.json();
+
+    // Format models from OpenAI-compatible response
+    const models = (data.data || []).map(model => ({
+      id: model.id,
+      name: model.id // Use model ID as display name
+    }));
+
+    res.json({ models });
+  } catch (error) {
+    console.error('SquatchServe models proxy error:', error.message);
+    res.status(503).json({ error: 'SquatchServe is not available', models: [] });
+  }
+});
+
+// SquatchServe chat endpoint (OpenAI-compatible streaming)
+app.post('/api/squatchserve/chat', chatLimiter, async (req, res) => {
+  const { model, messages } = req.body;
+
+  // SECURITY: Validate inputs
+  if (!isValidModelName(model)) {
+    return res.status(400).json({ error: 'Invalid model name' });
+  }
+
+  if (!isValidMessageArray(messages)) {
+    return res.status(400).json({ error: 'Invalid messages array' });
+  }
+
+  try {
+    const response = await fetch(`${SQUATCHSERVE_HOST}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: model,
+        stream: true,
+        messages: messages
+      })
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error('SquatchServe API error:', error);
+      return res.status(response.status).json({ error: 'SquatchServe API error' });
+    }
+
+    // Stream SSE response (OpenAI-compatible format)
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        res.write(chunk);
+      }
+      res.end();
+    } finally {
+      reader.releaseLock();
+    }
+  } catch (error) {
+    console.error('SquatchServe proxy error:', error.message);
+    if (!res.headersSent) {
+      res.status(503).json({ error: 'SquatchServe is not available' });
+    }
+  }
+});
+
 // ============ Voice Assistant Proxy ============
 
 // Text-to-Speech proxy (Kokoro TTS)
@@ -597,7 +915,314 @@ app.post('/api/stt/upload', express.raw({ type: 'audio/*', limit: '10mb' }), asy
   }
 });
 
+// ============ Memory-Enhanced Chat Endpoint ============
+
+/**
+ * POST /api/chat/memory
+ * Enhanced chat endpoint that:
+ * 1. Saves user message to SQLite
+ * 2. Searches for relevant past context from other conversations
+ * 3. Injects memory context into the system prompt
+ * 4. Saves assistant response and embeds it for future retrieval
+ */
+app.post('/api/chat/memory', chatLimiter, async (req, res) => {
+  try {
+    const { model, messages, ollamaHost, conversation_id, provider, apiKey } = req.body;
+
+    // SECURITY: Validate inputs
+    if (!isValidModelName(model)) {
+      return res.status(400).json({ error: 'Invalid model name' });
+    }
+
+    if (!isValidMessageArray(messages)) {
+      return res.status(400).json({ error: 'Invalid messages array' });
+    }
+
+    // Get or create conversation
+    let convoId = conversation_id;
+    if (!convoId) {
+      // Create a new conversation
+      convoId = db.createConversation(null, model);
+    }
+
+    // Get the latest user message
+    const userMessage = messages[messages.length - 1];
+    if (userMessage.role !== 'user') {
+      return res.status(400).json({ error: 'Last message must be from user' });
+    }
+
+    // DEBUG: Log conversation and message info
+    console.log('=== Memory Chat ===');
+    console.log('Conversation ID:', convoId);
+    console.log('User message:', userMessage.content.substring(0, 50));
+
+    // Save user message to database
+    const userMsgId = db.addMessage(convoId, 'user', userMessage.content, model);
+
+    // Generate embedding for the user message and search for relevant context
+    let memoryContext = [];
+    try {
+      const embedding = await db.generateEmbedding(userMessage.content);
+      console.log('Embedding generated, length:', embedding.length);
+
+      const similarMessages = await db.searchSimilar(embedding, convoId, 5, 0.7);
+      console.log('Similar messages found:', similarMessages.length);
+      if (similarMessages.length > 0) {
+        similarMessages.forEach((msg, i) => {
+          console.log(`  Match ${i + 1}: "${msg.text.substring(0, 30)}..." (similarity: ${msg.similarity.toFixed(3)})`);
+        });
+      }
+      memoryContext = similarMessages;
+
+      // Embed user message for future retrieval
+      await db.addEmbedding(userMsgId, convoId, userMessage.content, 'user', embedding);
+    } catch (embeddingError) {
+      console.error('Memory retrieval error:', embeddingError.message);
+      console.error('Stack trace:', embeddingError.stack);
+      // Continue without memory - not a fatal error
+    }
+
+    // Build messages array with memory context injected
+    if (memoryContext.length > 0) {
+      console.log('Injecting memory context');
+    } else {
+      console.log('No memory context to inject');
+    }
+    let enhancedMessages = [...messages];
+    if (memoryContext.length > 0) {
+      const contextText = memoryContext
+        .map((m, i) => `[Memory ${i + 1}] ${m.role}: ${m.text.substring(0, 500)}${m.text.length > 500 ? '...' : ''}`)
+        .join('\n');
+
+      const memorySystemMessage = {
+        role: 'system',
+        content: `You have access to relevant context from previous conversations:\n\n${contextText}\n\nUse this context if it helps answer the current question, but don't explicitly mention that you're using memory unless asked.`
+      };
+
+      // Insert memory context at the beginning
+      enhancedMessages = [memorySystemMessage, ...messages];
+    }
+
+    // Auto-generate title from first user message if needed
+    const conversation = db.getConversation(convoId);
+    if (!conversation.title && userMessage.content) {
+      const title = userMessage.content.substring(0, 50) + (userMessage.content.length > 50 ? '...' : '');
+      db.updateConversationTitle(convoId, title);
+    }
+
+    // Route to appropriate provider
+    let response;
+    const providerType = provider || 'ollama';
+
+    if (providerType === 'ollama') {
+      const host = getOllamaHost({ ollamaHost });
+      response = await fetch(`${host}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: enhancedMessages,
+          stream: true
+        })
+      });
+    } else if (providerType === 'claude') {
+      const claudeKey = apiKey || CLAUDE_API_KEY;
+      if (!claudeKey) {
+        return res.status(401).json({ error: 'Claude API key not configured' });
+      }
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': claudeKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 4096,
+          stream: true,
+          messages: enhancedMessages.filter(m => m.role !== 'system')
+        })
+      });
+    } else if (providerType === 'grok') {
+      const grokKey = apiKey || GROK_API_KEY;
+      if (!grokKey) {
+        return res.status(401).json({ error: 'Grok API key not configured' });
+      }
+      response = await fetch('https://api.x.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${grokKey}`
+        },
+        body: JSON.stringify({
+          model,
+          stream: true,
+          messages: enhancedMessages
+        })
+      });
+    } else if (providerType === 'openai') {
+      const openaiKey = apiKey || OPENAI_API_KEY;
+      if (!openaiKey) {
+        return res.status(401).json({ error: 'OpenAI API key not configured' });
+      }
+      response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${openaiKey}`
+        },
+        body: JSON.stringify({
+          model,
+          stream: true,
+          messages: enhancedMessages
+        })
+      });
+    } else if (providerType === 'squatchserve') {
+      response = await fetch(`${SQUATCHSERVE_HOST}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model,
+          stream: true,
+          messages: enhancedMessages
+        })
+      });
+    } else {
+      return res.status(400).json({ error: 'Unknown provider' });
+    }
+
+    if (!response.ok) {
+      throw new Error(`Provider returned ${response.status}`);
+    }
+
+    // Set up streaming response
+    const contentType = providerType === 'ollama' ? 'application/x-ndjson' : 'text/event-stream';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('X-Conversation-Id', convoId);
+    res.setHeader('X-Has-Memory-Context', memoryContext.length > 0 ? 'true' : 'false');
+
+    if (contentType === 'text/event-stream') {
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no'); // Disable Nginx buffering
+    }
+
+    // Flush headers immediately to start streaming
+    res.flushHeaders();
+
+    // Collect full response for saving
+    let fullResponse = '';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+
+        // Write decoded text for SSE, raw bytes for NDJSON
+        if (contentType === 'text/event-stream') {
+          res.write(chunk);
+        } else {
+          res.write(value);
+        }
+
+        // Parse and accumulate response
+        if (providerType === 'ollama') {
+          const lines = chunk.split('\n').filter(l => l.trim());
+          for (const line of lines) {
+            try {
+              const data = JSON.parse(line);
+              if (data.message?.content) {
+                fullResponse += data.message.content;
+              }
+            } catch (e) { /* ignore parse errors */ }
+          }
+        } else {
+          // SSE format (Claude/Grok/OpenAI/SquatchServe)
+          const lines = chunk.split('\n');
+          for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (!trimmedLine || trimmedLine === 'data: [DONE]') continue;
+
+            let jsonStr = trimmedLine;
+            if (trimmedLine.startsWith('data: ')) {
+              jsonStr = trimmedLine.slice(6);
+              if (jsonStr === '[DONE]') continue;
+            }
+
+            try {
+              const data = JSON.parse(jsonStr);
+              let content = null;
+
+              if (providerType === 'claude' && data.delta?.text) {
+                content = data.delta.text;
+              } else if (data.choices?.[0]?.delta?.content) {
+                content = data.choices[0].delta.content;
+              } else if (data.choices?.[0]?.message?.content) {
+                content = data.choices[0].message.content;
+              } else if (data.message?.content) {
+                content = data.message.content;
+              } else if (data.content) {
+                content = data.content;
+              } else if (data.text) {
+                content = data.text;
+              } else if (data.response) {
+                content = data.response;
+              }
+
+              if (content) {
+                fullResponse += content;
+              }
+            } catch (e) { /* ignore parse errors */ }
+          }
+        }
+      }
+      res.end();
+    } finally {
+      reader.releaseLock();
+    }
+
+    // Save assistant response to database
+    if (fullResponse) {
+      const assistantMsgId = db.addMessage(convoId, 'assistant', fullResponse, model);
+
+      // Embed assistant response for future retrieval
+      try {
+        const embedding = await db.generateEmbedding(fullResponse);
+        await db.addEmbedding(assistantMsgId, convoId, fullResponse, 'assistant', embedding);
+      } catch (embeddingError) {
+        console.warn('Failed to embed assistant response:', embeddingError.message);
+      }
+    }
+
+  } catch (error) {
+    console.error('Memory chat error:', error.message);
+    if (!res.headersSent) {
+      res.status(503).json({ error: error.message || 'Chat service unavailable' });
+    }
+  }
+});
+
 // ============ Start Server ============
+
+// Initialize databases
+try {
+  db.initDatabase();
+  console.log('SQLite database initialized');
+} catch (error) {
+  console.error('Failed to initialize SQLite:', error.message);
+}
+
+// Initialize vector store (async)
+db.initVectorStore()
+  .then(() => console.log('LanceDB vector store initialized'))
+  .catch(error => console.error('Failed to initialize LanceDB:', error.message));
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
@@ -609,10 +1234,15 @@ app.listen(PORT, () => {
   console.log('Available providers:');
   console.log(`  - Ollama: ${OLLAMA_HOST}`);
   console.log(`  - Claude: ${CLAUDE_API_KEY ? 'Configured' : 'Not configured'}`);
+  console.log(`  - OpenAI: ${OPENAI_API_KEY ? 'Configured' : 'Not configured'}`);
   console.log(`  - Grok: ${GROK_API_KEY ? 'Configured' : 'Not configured'}`);
+  console.log(`  - SquatchServe: ${SQUATCHSERVE_HOST}`);
   console.log('Voice services:');
   console.log(`  - TTS (Kokoro): ${TTS_HOST}`);
   console.log(`  - STT (Whisper): ${STT_HOST}`);
+  console.log('Conversation features:');
+  console.log('  - Chat history: SQLite');
+  console.log('  - Semantic memory: LanceDB');
   if (ALLOWED_OLLAMA_HOSTS.length > 0) {
     console.log(`  - Additional Ollama hosts: ${ALLOWED_OLLAMA_HOSTS.join(', ')}`);
   }

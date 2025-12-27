@@ -7,6 +7,23 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- Sidebar -->
+  <div id="sidebar" class="sidebar">
+    <div class="sidebar-header">
+      <button id="sidebar-new-chat-btn" class="sidebar-new-chat-btn">+ New Chat</button>
+    </div>
+    <div id="conversation-list" class="conversation-list">
+      <!-- Conversations will be populated here -->
+    </div>
+  </div>
+
+  <!-- Sidebar Toggle Button -->
+  <button id="sidebar-toggle" class="sidebar-toggle">☰</button>
+
+  <!-- Sidebar Overlay for Mobile -->
+  <div id="sidebar-overlay" class="sidebar-overlay"></div>
+
+  <div class="main-content">
   <div class="container">
     <div class="header">
       <h1>AI Chat Interface</h1>
@@ -61,6 +78,14 @@
           </div>
 
           <div class="setting-item">
+            <label for="openaiApiKey">OpenAI API Key</label>
+            <div class="api-key-input-wrapper">
+              <input type="password" id="openaiApiKey" class="api-key-input" placeholder="sk-...">
+              <button class="toggle-visibility-btn" data-target="openaiApiKey">👁️</button>
+            </div>
+          </div>
+
+          <div class="setting-item">
             <label for="grokApiKey">Grok API Key</label>
             <div class="api-key-input-wrapper">
               <input type="password" id="grokApiKey" class="api-key-input" placeholder="xai-...">
@@ -78,6 +103,8 @@
         <button id="saveSettings" class="save-btn">Save</button>
       </div>
     </div>
+  </div>
+
   </div>
 
     <script>document.write('<script src="script.js?v=' + Date.now() + '"><\/script>');</script>
