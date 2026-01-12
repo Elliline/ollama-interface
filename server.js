@@ -694,12 +694,13 @@ app.post('/api/openai/chat', chatLimiter, async (req, res) => {
 
 // ============ SquatchServe API Proxy ============
 
-const SQUATCHSERVE_HOST = process.env.SQUATCHSERVE_HOST || 'http://localhost:8001';
+const SQUATCHSERVE_HOST = process.env.SQUATCHSERVE_HOST || 'http://localhost:8111';
 
-// Fetch SquatchServe models dynamically (OpenAI-compatible API)
+// Fetch SquatchServe models dynamically (Ollama-compatible API)
 app.get('/api/squatchserve/models', async (req, res) => {
   try {
-    const response = await fetch(`${SQUATCHSERVE_HOST}/v1/models`, {
+    const squatchserveHost = req.query.host || SQUATCHSERVE_HOST;
+    const response = await fetch(`${squatchserveHost}/api/tags`, {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json'
@@ -714,10 +715,10 @@ app.get('/api/squatchserve/models', async (req, res) => {
 
     const data = await response.json();
 
-    // Format models from OpenAI-compatible response
-    const models = (data.data || []).map(model => ({
-      id: model.id,
-      name: model.id // Use model ID as display name
+    // Format models from Ollama-compatible response: { models: [{name, ...}] }
+    const models = (data.models || []).map(model => ({
+      id: model.name,
+      name: model.name
     }));
 
     res.json({ models });
@@ -727,9 +728,9 @@ app.get('/api/squatchserve/models', async (req, res) => {
   }
 });
 
-// SquatchServe chat endpoint (OpenAI-compatible streaming)
+// SquatchServe chat endpoint (Ollama-compatible streaming)
 app.post('/api/squatchserve/chat', chatLimiter, async (req, res) => {
-  const { model, messages } = req.body;
+  const { model, messages, squatchserveHost } = req.body;
 
   // SECURITY: Validate inputs
   if (!isValidModelName(model)) {
@@ -740,8 +741,10 @@ app.post('/api/squatchserve/chat', chatLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Invalid messages array' });
   }
 
+  const host = squatchserveHost || SQUATCHSERVE_HOST;
+
   try {
-    const response = await fetch(`${SQUATCHSERVE_HOST}/v1/chat/completions`, {
+    const response = await fetch(`${host}/api/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -759,20 +762,16 @@ app.post('/api/squatchserve/chat', chatLimiter, async (req, res) => {
       return res.status(response.status).json({ error: 'SquatchServe API error' });
     }
 
-    // Stream SSE response (OpenAI-compatible format)
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
+    // Stream NDJSON response (Ollama-compatible format)
+    res.setHeader('Content-Type', 'application/x-ndjson');
 
     const reader = response.body.getReader();
-    const decoder = new TextDecoder();
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        res.write(chunk);
+        res.write(value);
       }
       res.end();
     } finally {
@@ -1079,7 +1078,8 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
         })
       });
     } else if (providerType === 'squatchserve') {
-      response = await fetch(`${SQUATCHSERVE_HOST}/v1/chat/completions`, {
+      const squatchHost = req.body.squatchserveHost || SQUATCHSERVE_HOST;
+      response = await fetch(`${squatchHost}/api/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -1099,7 +1099,7 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
     }
 
     // Set up streaming response
-    const contentType = providerType === 'ollama' ? 'application/x-ndjson' : 'text/event-stream';
+    const contentType = (providerType === 'ollama' || providerType === 'squatchserve') ? 'application/x-ndjson' : 'text/event-stream';
     res.setHeader('Content-Type', contentType);
     res.setHeader('X-Conversation-Id', convoId);
     res.setHeader('X-Has-Memory-Context', memoryContext.length > 0 ? 'true' : 'false');
@@ -1133,7 +1133,7 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
         }
 
         // Parse and accumulate response
-        if (providerType === 'ollama') {
+        if (providerType === 'ollama' || providerType === 'squatchserve') {
           const lines = chunk.split('\n').filter(l => l.trim());
           for (const line of lines) {
             try {
@@ -1144,7 +1144,7 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
             } catch (e) { /* ignore parse errors */ }
           }
         } else {
-          // SSE format (Claude/Grok/OpenAI/SquatchServe)
+          // SSE format (Claude/Grok/OpenAI)
           const lines = chunk.split('\n');
           for (const line of lines) {
             const trimmedLine = line.trim();

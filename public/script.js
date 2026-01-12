@@ -163,7 +163,11 @@ async function loadModelsForProvider(providerId) {
       });
     } else if (providerId === 'squatchserve') {
       // Fetch SquatchServe models dynamically
-      const response = await fetch('/api/squatchserve/models');
+      const squatchserveHost = localStorage.getItem('squatchserveHost') || '';
+      const url = squatchserveHost
+        ? `/api/squatchserve/models?host=${encodeURIComponent(squatchserveHost)}`
+        : '/api/squatchserve/models';
+      const response = await fetch(url);
 
       if (!response.ok) {
         throw new Error('SquatchServe not available');
@@ -197,7 +201,7 @@ async function loadModelsForProvider(providerId) {
   } catch (error) {
     console.error('Error loading models:', error);
     const errorHint = providerId === 'ollama' ? 'Make sure Ollama is running.' :
-                      providerId === 'squatchserve' ? 'Make sure SquatchServe is running on localhost:8001.' :
+                      providerId === 'squatchserve' ? 'Make sure SquatchServe is running (default: localhost:8111).' :
                       'Check your API key in settings.';
     addMessage('error', `Failed to load models for ${providerId}. ${errorHint}`);
   }
@@ -310,6 +314,7 @@ async function sendMessage() {
 
     // Use memory-enhanced chat endpoint
     const ollamaHost = localStorage.getItem('ollamaHost') || undefined;
+    const squatchserveHost = localStorage.getItem('squatchserveHost') || undefined;
     const apiKey = currentProvider === 'claude'
       ? localStorage.getItem('claudeApiKey')
       : currentProvider === 'openai'
@@ -327,6 +332,7 @@ async function sendMessage() {
         provider: currentProvider,
         conversation_id: currentConversationId,
         ollamaHost,
+        squatchserveHost,
         apiKey
       })
     });
@@ -372,12 +378,13 @@ async function sendMessage() {
     chatContainer.scrollTop = chatContainer.scrollHeight;
 
     // Process stream based on provider
-    if (currentProvider === 'ollama') {
+    if (currentProvider === 'ollama' || currentProvider === 'squatchserve') {
+      // Ollama and SquatchServe use NDJSON streaming format
       fullResponse = await processOllamaStream(response);
     } else if (currentProvider === 'claude') {
       fullResponse = await processClaudeStream(response);
-    } else if (currentProvider === 'grok' || currentProvider === 'openai' || currentProvider === 'squatchserve') {
-      // Grok, OpenAI, and SquatchServe use the same OpenAI-compatible streaming format
+    } else if (currentProvider === 'grok' || currentProvider === 'openai') {
+      // Grok and OpenAI use OpenAI-compatible SSE streaming format
       fullResponse = await processGrokStream(response);
     }
 
@@ -1012,11 +1019,13 @@ function loadSettings() {
   const openaiKey = localStorage.getItem('openaiApiKey') || '';
   const grokKey = localStorage.getItem('grokApiKey') || '';
   const ollamaHost = localStorage.getItem('ollamaHost') || '';
+  const squatchserveHost = localStorage.getItem('squatchserveHost') || '';
 
   document.getElementById('claudeApiKey').value = claudeKey;
   document.getElementById('openaiApiKey').value = openaiKey;
   document.getElementById('grokApiKey').value = grokKey;
   document.getElementById('ollamaHost').value = ollamaHost;
+  document.getElementById('squatchserveHost').value = squatchserveHost;
 }
 
 async function saveSettingsHandler() {
@@ -1024,6 +1033,7 @@ async function saveSettingsHandler() {
   const openaiKey = document.getElementById('openaiApiKey').value.trim();
   const grokKey = document.getElementById('grokApiKey').value.trim();
   const ollamaHost = document.getElementById('ollamaHost').value.trim();
+  const squatchserveHost = document.getElementById('squatchserveHost').value.trim();
 
   // Save to localStorage
   if (claudeKey) {
@@ -1048,6 +1058,12 @@ async function saveSettingsHandler() {
     localStorage.setItem('ollamaHost', ollamaHost);
   } else {
     localStorage.removeItem('ollamaHost');
+  }
+
+  if (squatchserveHost) {
+    localStorage.setItem('squatchserveHost', squatchserveHost);
+  } else {
+    localStorage.removeItem('squatchserveHost');
   }
 
   // Close modal
