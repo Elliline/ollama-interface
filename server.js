@@ -785,6 +785,60 @@ app.post('/api/squatchserve/chat', chatLimiter, async (req, res) => {
   }
 });
 
+// SquatchServe status endpoint - get loaded models and VRAM usage
+app.get('/api/squatchserve/ps', async (req, res) => {
+  try {
+    const squatchserveHost = req.query.host || SQUATCHSERVE_HOST;
+    const response = await fetch(`${squatchserveHost}/api/ps`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error('SquatchServe ps error:', error);
+      return res.status(response.status).json({ error: 'Failed to get SquatchServe status' });
+    }
+
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    console.error('SquatchServe ps proxy error:', error.message);
+    res.status(503).json({ error: 'SquatchServe is not available', models: [], gpu: {} });
+  }
+});
+
+// SquatchServe unload endpoint - unload a model to free VRAM
+app.post('/api/squatchserve/unload', async (req, res) => {
+  const { name, squatchserveHost } = req.body;
+
+  if (!name || typeof name !== 'string') {
+    return res.status(400).json({ error: 'Model name is required' });
+  }
+
+  const host = squatchserveHost || SQUATCHSERVE_HOST;
+
+  try {
+    const response = await fetch(`${host}/api/unload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error('SquatchServe unload error:', error);
+      return res.status(response.status).json({ error: 'Failed to unload model' });
+    }
+
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    console.error('SquatchServe unload proxy error:', error.message);
+    res.status(503).json({ error: 'SquatchServe is not available' });
+  }
+});
+
 // ============ Voice Assistant Proxy ============
 
 // Text-to-Speech proxy (Kokoro TTS)

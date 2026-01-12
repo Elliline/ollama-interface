@@ -120,6 +120,54 @@ body {
   border-color: var(--primary-color);
 }
 
+/* Model Status Bar (SquatchServe) */
+.model-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background-color: var(--surface-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  margin-top: 10px;
+  font-size: 0.85rem;
+}
+
+.model-status-text {
+  color: var(--text-secondary);
+}
+
+.model-status-text.loaded {
+  color: var(--success-color);
+}
+
+.model-status-bar .vram-info {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin-left: auto;
+}
+
+.unload-btn {
+  padding: 4px 10px;
+  border-radius: var(--border-radius);
+  border: 1px solid var(--error-color);
+  background-color: transparent;
+  color: var(--error-color);
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: all 0.2s ease;
+}
+
+.unload-btn:hover {
+  background-color: var(--error-color);
+  color: var(--text-color);
+}
+
+.unload-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Chat container */
 .chat-container {
   flex: 1;

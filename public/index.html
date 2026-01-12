@@ -38,8 +38,13 @@
         <button id="settingsBtn" class="settings-btn" title="Settings">⚙️</button>
         <button id="newChatBtn" class="new-chat-btn">New Chat</button>
       </div>
+      <!-- SquatchServe Model Status -->
+      <div id="modelStatusBar" class="model-status-bar" style="display: none;">
+        <span id="modelStatusText" class="model-status-text">No model loaded</span>
+        <button id="unloadModelBtn" class="unload-btn" style="display: none;" title="Unload model to free VRAM">Unload</button>
+      </div>
     </div>
-    
+
     <div id="chatContainer" class="chat-container">
       <div id="messages" class="messages"></div>
       <div id="typingIndicator" class="typing-indicator" style="display: none;">

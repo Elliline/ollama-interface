@@ -20,12 +20,19 @@ const settingsModal = document.getElementById('settingsModal');
 const closeModal = document.getElementById('closeModal');
 const saveSettings = document.getElementById('saveSettings');
 
+// SquatchServe model status elements
+const modelStatusBar = document.getElementById('modelStatusBar');
+const modelStatusText = document.getElementById('modelStatusText');
+const unloadModelBtn = document.getElementById('unloadModelBtn');
+
 // State variables
 let currentProvider = '';
 let currentModel = '';
 let providers = [];
 let conversation = [];
 let isTyping = false;
+let squatchserveStatusInterval = null;
+let loadedSquatchserveModel = null;
 let lastAssistantMessageId = null;
 let streamingMessageElement = null;
 let pendingContent = null;
@@ -95,6 +102,9 @@ async function loadProviders() {
       providerSelect.value = savedProvider;
       currentProvider = savedProvider;
       await loadModelsForProvider(savedProvider);
+
+      // Initialize model status bar for SquatchServe
+      updateModelStatusBarVisibility();
     }
   } catch (error) {
     console.error('Error loading providers:', error);
@@ -256,6 +266,11 @@ function setupEventListeners() {
     btn.addEventListener('click', togglePasswordVisibility);
   });
 
+  // SquatchServe unload button
+  if (unloadModelBtn) {
+    unloadModelBtn.addEventListener('click', unloadSquatchserveModel);
+  }
+
   // Close modal on outside click
   settingsModal.addEventListener('click', (e) => {
     if (e.target === settingsModal) {
@@ -268,6 +283,9 @@ function setupEventListeners() {
 async function handleProviderChange() {
   currentProvider = providerSelect.value;
   localStorage.setItem('selectedProvider', currentProvider);
+
+  // Update model status bar visibility for SquatchServe
+  updateModelStatusBarVisibility();
 
   if (currentProvider) {
     await loadModelsForProvider(currentProvider);
@@ -1350,5 +1368,138 @@ async function deleteConversation(id) {
   } catch (error) {
     console.error('Error deleting conversation:', error);
     alert('Failed to delete conversation');
+  }
+}
+
+// ============ SquatchServe Model Status Functions ============
+
+// Fetch SquatchServe status (loaded models)
+async function fetchSquatchserveStatus() {
+  if (currentProvider !== 'squatchserve') {
+    return;
+  }
+
+  try {
+    const squatchserveHost = localStorage.getItem('squatchserveHost') || '';
+    const url = squatchserveHost
+      ? `/api/squatchserve/ps?host=${encodeURIComponent(squatchserveHost)}`
+      : '/api/squatchserve/ps';
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error('Failed to fetch status');
+    }
+
+    const data = await response.json();
+    updateModelStatusDisplay(data);
+  } catch (error) {
+    console.error('Error fetching SquatchServe status:', error);
+    // Show error state but don't spam console
+    if (modelStatusBar) {
+      modelStatusText.textContent = 'SquatchServe unavailable';
+      modelStatusText.classList.remove('loaded');
+      unloadModelBtn.style.display = 'none';
+    }
+  }
+}
+
+// Update the model status display
+function updateModelStatusDisplay(data) {
+  if (!modelStatusBar) return;
+
+  const loadedModels = data.models || [];
+  const gpu = data.gpu || {};
+
+  if (loadedModels.length > 0) {
+    const model = loadedModels[0]; // Show first loaded model
+    loadedSquatchserveModel = model.name;
+
+    // Format VRAM info if available
+    let vramInfo = '';
+    if (model.vram && model.vram.used_gb) {
+      vramInfo = ` (${model.vram.used_gb.toFixed(1)}GB VRAM)`;
+    } else if (gpu.used_gb) {
+      vramInfo = ` (${gpu.used_gb.toFixed(1)}/${gpu.total_gb.toFixed(1)}GB VRAM)`;
+    }
+
+    modelStatusText.textContent = `Loaded: ${model.name}${vramInfo}`;
+    modelStatusText.classList.add('loaded');
+    unloadModelBtn.style.display = 'inline-block';
+  } else {
+    loadedSquatchserveModel = null;
+    modelStatusText.textContent = 'No model loaded';
+    modelStatusText.classList.remove('loaded');
+    unloadModelBtn.style.display = 'none';
+  }
+}
+
+// Unload the currently loaded model
+async function unloadSquatchserveModel() {
+  if (!loadedSquatchserveModel) {
+    return;
+  }
+
+  const modelName = loadedSquatchserveModel;
+  unloadModelBtn.disabled = true;
+  unloadModelBtn.textContent = 'Unloading...';
+
+  try {
+    const squatchserveHost = localStorage.getItem('squatchserveHost') || undefined;
+
+    const response = await fetch('/api/squatchserve/unload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: modelName, squatchserveHost })
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to unload model');
+    }
+
+    addMessage('system', `Model ${modelName} unloaded successfully.`);
+
+    // Immediately refresh status
+    await fetchSquatchserveStatus();
+  } catch (error) {
+    console.error('Error unloading model:', error);
+    addMessage('error', `Failed to unload model: ${error.message}`);
+  } finally {
+    unloadModelBtn.disabled = false;
+    unloadModelBtn.textContent = 'Unload';
+  }
+}
+
+// Start polling for SquatchServe status
+function startSquatchserveStatusPolling() {
+  // Clear any existing interval
+  stopSquatchserveStatusPolling();
+
+  // Fetch immediately
+  fetchSquatchserveStatus();
+
+  // Then poll every 30 seconds
+  squatchserveStatusInterval = setInterval(fetchSquatchserveStatus, 30000);
+}
+
+// Stop polling for SquatchServe status
+function stopSquatchserveStatusPolling() {
+  if (squatchserveStatusInterval) {
+    clearInterval(squatchserveStatusInterval);
+    squatchserveStatusInterval = null;
+  }
+}
+
+// Show/hide model status bar based on provider
+function updateModelStatusBarVisibility() {
+  if (!modelStatusBar) return;
+
+  if (currentProvider === 'squatchserve') {
+    modelStatusBar.style.display = 'flex';
+    startSquatchserveStatusPolling();
+  } else {
+    modelStatusBar.style.display = 'none';
+    stopSquatchserveStatusPolling();
+    loadedSquatchserveModel = null;
   }
 }
