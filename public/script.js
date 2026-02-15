@@ -14,6 +14,7 @@ const sendBtn = document.getElementById('sendBtn');
 const typingIndicator = document.getElementById('typingIndicator');
 const micBtn = document.getElementById('micBtn');
 const convoModeBtn = document.getElementById('convoModeBtn');
+const searchToggleBtn = document.getElementById('searchToggleBtn');
 const speakerToggle = document.getElementById('speakerToggle');
 const settingsBtn = document.getElementById('settingsBtn');
 const settingsModal = document.getElementById('settingsModal');
@@ -42,6 +43,7 @@ let isRecording = false;
 let mediaRecorder = null;
 let audioChunks = [];
 let conversationMode = false;
+let searchEnabled = false;
 let silenceTimer = null;
 let audioContext = null;
 let analyser = null;
@@ -192,6 +194,23 @@ async function loadModelsForProvider(providerId) {
         option.textContent = model.name;
         modelSelect.appendChild(option);
       });
+    } else if (providerId === 'llamacpp') {
+      // Fetch Llama.cpp models dynamically
+      const response = await fetch('/api/llamacpp/models');
+
+      if (!response.ok) {
+        throw new Error('Llama.cpp not available');
+      }
+
+      const data = await response.json();
+      const models = data.models || [];
+
+      models.forEach(model => {
+        const option = document.createElement('option');
+        option.value = model.id;
+        option.textContent = model.name;
+        modelSelect.appendChild(option);
+      });
     } else {
       // Use pre-defined models for Claude and Grok
       provider.models.forEach(model => {
@@ -212,6 +231,7 @@ async function loadModelsForProvider(providerId) {
     console.error('Error loading models:', error);
     const errorHint = providerId === 'ollama' ? 'Make sure Ollama is running.' :
                       providerId === 'squatchserve' ? 'Make sure SquatchServe is running (default: localhost:8111).' :
+                      providerId === 'llamacpp' ? 'Make sure llama.cpp server is running (default: localhost:8080).' :
                       'Check your API key in settings.';
     addMessage('error', `Failed to load models for ${providerId}. ${errorHint}`);
   }
@@ -254,6 +274,7 @@ function setupEventListeners() {
   messageInput.addEventListener('input', autoResizeInput);
   micBtn.addEventListener('mousedown', startRecording);
   convoModeBtn.addEventListener('click', toggleConversationMode);
+  searchToggleBtn.addEventListener('click', toggleSearch);
   micBtn.addEventListener('mouseup', stopRecording);
   micBtn.addEventListener('mouseleave', stopRecording);
   speakerToggle.addEventListener('click', toggleTTS);
@@ -333,6 +354,7 @@ async function sendMessage() {
     // Use memory-enhanced chat endpoint
     const ollamaHost = localStorage.getItem('ollamaHost') || undefined;
     const squatchserveHost = localStorage.getItem('squatchserveHost') || undefined;
+    const llamacppHost = localStorage.getItem('llamacppHost') || undefined;
     const apiKey = currentProvider === 'claude'
       ? localStorage.getItem('claudeApiKey')
       : currentProvider === 'openai'
@@ -351,7 +373,10 @@ async function sendMessage() {
         conversation_id: currentConversationId,
         ollamaHost,
         squatchserveHost,
-        apiKey
+        llamacppHost,
+        apiKey,
+        searchEnabled,
+        searxngHost: localStorage.getItem('searxngHost') || undefined
       })
     });
 
@@ -378,6 +403,12 @@ async function sendMessage() {
       showMemoryIndicator();
     }
 
+    // Show search results indicator if applicable
+    const hasSearchResults = response.headers.get('X-Has-Search-Results') === 'true';
+    if (hasSearchResults) {
+      showSearchIndicator();
+    }
+
     // Handle streaming response
     let fullResponse = '';
     const assistantMessageId = Date.now();
@@ -401,8 +432,8 @@ async function sendMessage() {
       fullResponse = await processOllamaStream(response);
     } else if (currentProvider === 'claude') {
       fullResponse = await processClaudeStream(response);
-    } else if (currentProvider === 'grok' || currentProvider === 'openai') {
-      // Grok and OpenAI use OpenAI-compatible SSE streaming format
+    } else if (currentProvider === 'grok' || currentProvider === 'openai' || currentProvider === 'llamacpp') {
+      // Grok, OpenAI, and Llama.cpp use OpenAI-compatible SSE streaming format
       fullResponse = await processGrokStream(response);
     }
 
@@ -451,6 +482,18 @@ function showMemoryIndicator() {
   messagesContainer.appendChild(indicator);
 
   // Remove after a few seconds
+  setTimeout(() => {
+    indicator.remove();
+  }, 5000);
+}
+
+// Show search results indicator
+function showSearchIndicator() {
+  const indicator = document.createElement('div');
+  indicator.className = 'search-results-indicator';
+  indicator.textContent = 'Enhanced with web search results';
+  messagesContainer.appendChild(indicator);
+
   setTimeout(() => {
     indicator.remove();
   }, 5000);
@@ -824,6 +867,13 @@ function toggleTTS() {
   }
 }
 
+// Search Toggle
+function toggleSearch() {
+  searchEnabled = !searchEnabled;
+  searchToggleBtn.textContent = searchEnabled ? '🌐' : '🔍';
+  searchToggleBtn.classList.toggle('enabled', searchEnabled);
+}
+
 // Recording functions
 async function startRecording() {
   // Unlock audio on mic interaction
@@ -1038,12 +1088,16 @@ function loadSettings() {
   const grokKey = localStorage.getItem('grokApiKey') || '';
   const ollamaHost = localStorage.getItem('ollamaHost') || '';
   const squatchserveHost = localStorage.getItem('squatchserveHost') || '';
+  const llamacppHost = localStorage.getItem('llamacppHost') || '';
+  const searxngHost = localStorage.getItem('searxngHost') || '';
 
   document.getElementById('claudeApiKey').value = claudeKey;
   document.getElementById('openaiApiKey').value = openaiKey;
   document.getElementById('grokApiKey').value = grokKey;
   document.getElementById('ollamaHost').value = ollamaHost;
   document.getElementById('squatchserveHost').value = squatchserveHost;
+  document.getElementById('llamacppHost').value = llamacppHost;
+  document.getElementById('searxngHost').value = searxngHost;
 }
 
 async function saveSettingsHandler() {
@@ -1052,6 +1106,8 @@ async function saveSettingsHandler() {
   const grokKey = document.getElementById('grokApiKey').value.trim();
   const ollamaHost = document.getElementById('ollamaHost').value.trim();
   const squatchserveHost = document.getElementById('squatchserveHost').value.trim();
+  const llamacppHost = document.getElementById('llamacppHost').value.trim();
+  const searxngHost = document.getElementById('searxngHost').value.trim();
 
   // Save to localStorage
   if (claudeKey) {
@@ -1082,6 +1138,18 @@ async function saveSettingsHandler() {
     localStorage.setItem('squatchserveHost', squatchserveHost);
   } else {
     localStorage.removeItem('squatchserveHost');
+  }
+
+  if (llamacppHost) {
+    localStorage.setItem('llamacppHost', llamacppHost);
+  } else {
+    localStorage.removeItem('llamacppHost');
+  }
+
+  if (searxngHost) {
+    localStorage.setItem('searxngHost', searxngHost);
+  } else {
+    localStorage.removeItem('searxngHost');
   }
 
   // Close modal

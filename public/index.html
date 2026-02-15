@@ -58,6 +58,7 @@
       <textarea id="messageInput" class="message-input" placeholder="Type your message..." rows="1"></textarea>
       <button id="micBtn" class="mic-btn" title="Hold to talk">🎤</button>
       <button id="convoModeBtn" class="convo-btn" title="Toggle conversation mode">💬</button>
+      <button id="searchToggleBtn" class="search-btn" title="Toggle web search">🔍</button>
       <button id="sendBtn" class="send-btn">Send</button>
     </div>
   </div>
@@ -106,6 +107,16 @@
           <div class="setting-item">
             <label for="squatchserveHost">SquatchServe Host (optional)</label>
             <input type="text" id="squatchserveHost" class="api-key-input" placeholder="http://localhost:8111">
+          </div>
+
+          <div class="setting-item">
+            <label for="llamacppHost">Llama.cpp Server URL (optional)</label>
+            <input type="text" id="llamacppHost" class="api-key-input" placeholder="http://localhost:8080">
+          </div>
+
+          <div class="setting-item">
+            <label for="searxngHost">SearXNG Host (optional)</label>
+            <input type="text" id="searxngHost" class="api-key-input" placeholder="http://192.168.4.97:8888">
           </div>
         </div>
       </div>

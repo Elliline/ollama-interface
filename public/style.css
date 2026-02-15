@@ -442,6 +442,18 @@ body {
 .convo-btn:hover { background: #4b5563; }
 .convo-btn.active { background: #059669; }
 
+.search-btn {
+  background: #374151;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 15px;
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.search-btn:hover { background: #4b5563; }
+.search-btn.enabled { background: #059669; }
+
 /* Modal styles */
 .modal {
   display: none;
@@ -866,6 +878,17 @@ body {
   background-color: rgba(158, 127, 255, 0.1);
   border-radius: var(--border-radius);
   border-left: 3px solid var(--primary-color);
+}
+
+/* Search results indicator */
+.search-results-indicator {
+  font-size: 0.75rem;
+  color: var(--secondary-color);
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  background-color: rgba(56, 189, 248, 0.1);
+  border-radius: var(--border-radius);
+  border-left: 3px solid var(--secondary-color);
 }
 
 /* Responsive Design - Mobile */

@@ -28,6 +28,7 @@ const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || '';
 const GROK_API_KEY = process.env.GROK_API_KEY || '';
 const TTS_HOST = process.env.TTS_HOST || 'http://localhost:5050';
 const STT_HOST = process.env.STT_HOST || 'http://localhost:5051';
+const SEARXNG_HOST = process.env.SEARXNG_HOST || 'http://192.168.4.97:8888';
 
 // Additional allowed Ollama hosts (comma-separated in .env)
 const ALLOWED_OLLAMA_HOSTS = process.env.ALLOWED_OLLAMA_HOSTS
@@ -202,6 +203,12 @@ const PROVIDERS = {
     name: 'SquatchServe (Local)',
     requiresKey: false,
     models: [] // Dynamically loaded from localhost:8001
+  },
+  llamacpp: {
+    id: 'llamacpp',
+    name: 'Llama.cpp (Local)',
+    requiresKey: false,
+    models: [] // Dynamically loaded from /api/llamacpp/models
   }
 };
 
@@ -249,6 +256,13 @@ app.post('/api/providers', (req, res) => {
       requiresKey: false,
       hasKey: true, // SquatchServe doesn't need a key
       models: [] // Loaded dynamically
+    },
+    {
+      id: PROVIDERS.llamacpp.id,
+      name: PROVIDERS.llamacpp.name,
+      requiresKey: false,
+      hasKey: true, // Llama.cpp doesn't need a key
+      models: [] // Loaded dynamically
     }
   ];
 
@@ -261,8 +275,8 @@ app.get('/api/providers', (req, res) => {
     id: p.id,
     name: p.name,
     requiresKey: p.requiresKey,
-    hasKey: p.id === 'ollama' || p.id === 'squatchserve' ? true : false, // Can't know client keys in GET
-    models: ['ollama', 'openai', 'squatchserve'].includes(p.id) ? [] : p.models
+    hasKey: p.id === 'ollama' || p.id === 'squatchserve' || p.id === 'llamacpp' ? true : false, // Can't know client keys in GET
+    models: ['ollama', 'openai', 'squatchserve', 'llamacpp'].includes(p.id) ? [] : p.models
   }));
   res.json({ providers: availableProviders });
 });
@@ -695,6 +709,7 @@ app.post('/api/openai/chat', chatLimiter, async (req, res) => {
 // ============ SquatchServe API Proxy ============
 
 const SQUATCHSERVE_HOST = process.env.SQUATCHSERVE_HOST || 'http://localhost:8111';
+const LLAMACPP_HOST = process.env.LLAMACPP_HOST || 'http://localhost:8080';
 
 // Fetch SquatchServe models dynamically (Ollama-compatible API)
 app.get('/api/squatchserve/models', async (req, res) => {
@@ -839,6 +854,83 @@ app.post('/api/squatchserve/unload', async (req, res) => {
   }
 });
 
+// ============ Llama.cpp API Proxy ============
+
+// Fetch Llama.cpp models (hardcoded list)
+app.get('/api/llamacpp/models', (req, res) => {
+  const models = [
+    { id: 'qwen3-coder', name: 'Qwen3 Coder Next' },
+    { id: 'qwen3-next', name: 'Qwen3 Next' },
+    { id: 'scout', name: 'Llama 4 Scout 109B' }
+  ];
+  res.json({ models });
+});
+
+// ============ SearXNG Web Search ============
+
+// Detect if a message has search intent
+function detectSearchIntent(message) {
+  const patterns = [
+    /\bsearch\s+(for|about)\b/i,
+    /\blook\s+up\b/i,
+    /\bgoogle\b/i,
+    /\bfind\s+me\b/i,
+    /\bwhat\s+is\s+the\s+latest\b/i,
+    /\bcurrent\s+news\b/i,
+    /\brecent\s+news\b/i,
+    /\blatest\s+news\b/i,
+    /\bweb\s+search\b/i,
+  ];
+  return patterns.some(p => p.test(message));
+}
+
+// Extract a cleaner search query from the message
+function extractSearchQuery(message) {
+  return message
+    .replace(/\b(search\s+(for|about)|look\s+up|google|find\s+me|web\s+search)\b/gi, '')
+    .replace(/\b(what\s+is\s+the\s+latest|current\s+news\s+(about|on)|latest\s+news\s+(about|on)|recent\s+news\s+(about|on))\b/gi, '')
+    .replace(/[?.!]+$/, '')
+    .trim() || message;
+}
+
+// SearXNG search endpoint
+app.post('/api/search', async (req, res) => {
+  try {
+    const { query, searxngHost } = req.body;
+
+    if (!query || typeof query !== 'string' || query.length > 500) {
+      return res.status(400).json({ error: 'Invalid search query' });
+    }
+
+    // SECURITY: Validate custom SearXNG host
+    const host = searxngHost ? (isValidOllamaHost(searxngHost) ? searxngHost : null) : SEARXNG_HOST;
+    if (!host) {
+      return res.status(400).json({ error: 'Invalid SearXNG host' });
+    }
+
+    const searchUrl = `${host}/search?q=${encodeURIComponent(query)}&format=json`;
+    const response = await fetch(searchUrl, {
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (!response.ok) {
+      throw new Error(`SearXNG returned ${response.status}`);
+    }
+
+    const data = await response.json();
+    const results = (data.results || []).slice(0, 5).map(r => ({
+      url: r.url,
+      title: r.title,
+      content: r.content
+    }));
+
+    res.json({ results });
+  } catch (error) {
+    console.error('SearXNG search error:', error.message);
+    res.status(503).json({ error: 'Search service unavailable', results: [] });
+  }
+});
+
 // ============ Voice Assistant Proxy ============
 
 // Text-to-Speech proxy (Kokoro TTS)
@@ -980,7 +1072,7 @@ app.post('/api/stt/upload', express.raw({ type: 'audio/*', limit: '10mb' }), asy
  */
 app.post('/api/chat/memory', chatLimiter, async (req, res) => {
   try {
-    const { model, messages, ollamaHost, conversation_id, provider, apiKey } = req.body;
+    const { model, messages, ollamaHost, conversation_id, provider, apiKey, searchEnabled, searxngHost } = req.body;
 
     // SECURITY: Validate inputs
     if (!isValidModelName(model)) {
@@ -1035,13 +1127,52 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
       // Continue without memory - not a fatal error
     }
 
-    // Build messages array with memory context injected
+    // Web search if enabled and intent detected
+    let searchResults = [];
+    let searchQuery = '';
+    if (searchEnabled && detectSearchIntent(userMessage.content)) {
+      try {
+        searchQuery = extractSearchQuery(userMessage.content);
+        const host = searxngHost ? (isValidOllamaHost(searxngHost) ? searxngHost : SEARXNG_HOST) : SEARXNG_HOST;
+        const searchUrl = `${host}/search?q=${encodeURIComponent(searchQuery)}&format=json`;
+        console.log('Searching SearXNG:', searchQuery);
+
+        const searchResponse = await fetch(searchUrl, {
+          signal: AbortSignal.timeout(5000)
+        });
+
+        if (searchResponse.ok) {
+          const searchData = await searchResponse.json();
+          searchResults = (searchData.results || []).slice(0, 5);
+          console.log('Search results found:', searchResults.length);
+        }
+      } catch (searchError) {
+        console.error('Search error (non-fatal):', searchError.message);
+      }
+    }
+
+    // Build messages array with memory and search context injected
     if (memoryContext.length > 0) {
       console.log('Injecting memory context');
     } else {
       console.log('No memory context to inject');
     }
     let enhancedMessages = [...messages];
+
+    // Add search results as system message
+    if (searchResults.length > 0) {
+      const searchContext = searchResults
+        .map((r, i) => `${i + 1}. ${r.title} - ${(r.content || '').substring(0, 200)} (${r.url})`)
+        .join('\n');
+
+      const searchSystemMessage = {
+        role: 'system',
+        content: `Web search results for '${searchQuery}':\n${searchContext}\n\nUse these search results to inform your response. Cite sources when appropriate.`
+      };
+      enhancedMessages = [searchSystemMessage, ...enhancedMessages];
+    }
+
+    // Add memory context as system message
     if (memoryContext.length > 0) {
       const contextText = memoryContext
         .map((m, i) => `[Memory ${i + 1}] ${m.role}: ${m.text.substring(0, 500)}${m.text.length > 500 ? '...' : ''}`)
@@ -1051,9 +1182,7 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
         role: 'system',
         content: `You have access to relevant context from previous conversations:\n\n${contextText}\n\nUse this context if it helps answer the current question, but don't explicitly mention that you're using memory unless asked.`
       };
-
-      // Insert memory context at the beginning
-      enhancedMessages = [memorySystemMessage, ...messages];
+      enhancedMessages = [memorySystemMessage, ...enhancedMessages];
     }
 
     // Auto-generate title from first user message if needed
@@ -1144,6 +1273,19 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
           messages: enhancedMessages
         })
       });
+    } else if (providerType === 'llamacpp') {
+      const llamacppHost = req.body.llamacppHost || LLAMACPP_HOST;
+      response = await fetch(`${llamacppHost}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model,
+          stream: true,
+          messages: enhancedMessages
+        })
+      });
     } else {
       return res.status(400).json({ error: 'Unknown provider' });
     }
@@ -1157,6 +1299,7 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
     res.setHeader('Content-Type', contentType);
     res.setHeader('X-Conversation-Id', convoId);
     res.setHeader('X-Has-Memory-Context', memoryContext.length > 0 ? 'true' : 'false');
+    res.setHeader('X-Has-Search-Results', searchResults.length > 0 ? 'true' : 'false');
 
     if (contentType === 'text/event-stream') {
       res.setHeader('Cache-Control', 'no-cache');
@@ -1291,6 +1434,8 @@ app.listen(PORT, () => {
   console.log(`  - OpenAI: ${OPENAI_API_KEY ? 'Configured' : 'Not configured'}`);
   console.log(`  - Grok: ${GROK_API_KEY ? 'Configured' : 'Not configured'}`);
   console.log(`  - SquatchServe: ${SQUATCHSERVE_HOST}`);
+  console.log(`  - Llama.cpp: ${LLAMACPP_HOST}`);
+  console.log(`  - SearXNG: ${SEARXNG_HOST}`);
   console.log('Voice services:');
   console.log(`  - TTS (Kokoro): ${TTS_HOST}`);
   console.log(`  - STT (Whisper): ${STT_HOST}`);
