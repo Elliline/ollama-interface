@@ -13,6 +13,9 @@ const rateLimit = require('express-rate-limit');
 // Database modules
 const db = require('./db/database');
 
+// MCP tool calling
+const MCPClient = require('./mcp/mcp-client');
+
 // Routes
 const conversationsRouter = require('./routes/conversations');
 
@@ -711,6 +714,10 @@ app.post('/api/openai/chat', chatLimiter, async (req, res) => {
 const SQUATCHSERVE_HOST = process.env.SQUATCHSERVE_HOST || 'http://localhost:8111';
 const LLAMACPP_HOST = process.env.LLAMACPP_HOST || 'http://localhost:8080';
 
+// Initialize MCP tool client
+const mcpClient = new MCPClient();
+mcpClient.loadConfig();
+
 // Fetch SquatchServe models dynamically (Ollama-compatible API)
 app.get('/api/squatchserve/models', async (req, res) => {
   try {
@@ -867,31 +874,6 @@ app.get('/api/llamacpp/models', (req, res) => {
 });
 
 // ============ SearXNG Web Search ============
-
-// Detect if a message has search intent
-function detectSearchIntent(message) {
-  const patterns = [
-    /\bsearch\s+(for|about)\b/i,
-    /\blook\s+up\b/i,
-    /\bgoogle\b/i,
-    /\bfind\s+me\b/i,
-    /\bwhat\s+is\s+the\s+latest\b/i,
-    /\bcurrent\s+news\b/i,
-    /\brecent\s+news\b/i,
-    /\blatest\s+news\b/i,
-    /\bweb\s+search\b/i,
-  ];
-  return patterns.some(p => p.test(message));
-}
-
-// Extract a cleaner search query from the message
-function extractSearchQuery(message) {
-  return message
-    .replace(/\b(search\s+(for|about)|look\s+up|google|find\s+me|web\s+search)\b/gi, '')
-    .replace(/\b(what\s+is\s+the\s+latest|current\s+news\s+(about|on)|latest\s+news\s+(about|on)|recent\s+news\s+(about|on))\b/gi, '')
-    .replace(/[?.!]+$/, '')
-    .trim() || message;
-}
 
 // SearXNG search endpoint
 app.post('/api/search', async (req, res) => {
@@ -1072,7 +1054,7 @@ app.post('/api/stt/upload', express.raw({ type: 'audio/*', limit: '10mb' }), asy
  */
 app.post('/api/chat/memory', chatLimiter, async (req, res) => {
   try {
-    const { model, messages, ollamaHost, conversation_id, provider, apiKey, searchEnabled, searxngHost } = req.body;
+    const { model, messages, ollamaHost, conversation_id, provider, apiKey, toolsEnabled, searxngHost } = req.body;
 
     // SECURITY: Validate inputs
     if (!isValidModelName(model)) {
@@ -1099,7 +1081,9 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
     // DEBUG: Log conversation and message info
     console.log('=== Memory Chat ===');
     console.log('Conversation ID:', convoId);
-    console.log('User message:', userMessage.content.substring(0, 50));
+    console.log('Provider:', provider || 'ollama', '| Model:', model);
+    console.log('User message:', userMessage.content.substring(0, 80));
+    console.log('Tools enabled:', toolsEnabled, '(type:', typeof toolsEnabled, ') | MCP has tools:', mcpClient.hasTools(), '| Tool names:', mcpClient.getToolNames());
 
     // Save user message to database
     const userMsgId = db.addMessage(convoId, 'user', userMessage.content, model);
@@ -1127,50 +1111,13 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
       // Continue without memory - not a fatal error
     }
 
-    // Web search if enabled and intent detected
-    let searchResults = [];
-    let searchQuery = '';
-    if (searchEnabled && detectSearchIntent(userMessage.content)) {
-      try {
-        searchQuery = extractSearchQuery(userMessage.content);
-        const host = searxngHost ? (isValidOllamaHost(searxngHost) ? searxngHost : SEARXNG_HOST) : SEARXNG_HOST;
-        const searchUrl = `${host}/search?q=${encodeURIComponent(searchQuery)}&format=json`;
-        console.log('Searching SearXNG:', searchQuery);
-
-        const searchResponse = await fetch(searchUrl, {
-          signal: AbortSignal.timeout(5000)
-        });
-
-        if (searchResponse.ok) {
-          const searchData = await searchResponse.json();
-          searchResults = (searchData.results || []).slice(0, 5);
-          console.log('Search results found:', searchResults.length);
-        }
-      } catch (searchError) {
-        console.error('Search error (non-fatal):', searchError.message);
-      }
-    }
-
-    // Build messages array with memory and search context injected
+    // Build messages array with memory context injected
     if (memoryContext.length > 0) {
       console.log('Injecting memory context');
     } else {
       console.log('No memory context to inject');
     }
     let enhancedMessages = [...messages];
-
-    // Add search results as system message
-    if (searchResults.length > 0) {
-      const searchContext = searchResults
-        .map((r, i) => `${i + 1}. ${r.title} - ${(r.content || '').substring(0, 200)} (${r.url})`)
-        .join('\n');
-
-      const searchSystemMessage = {
-        role: 'system',
-        content: `Web search results for '${searchQuery}':\n${searchContext}\n\nUse these search results to inform your response. Cite sources when appropriate.`
-      };
-      enhancedMessages = [searchSystemMessage, ...enhancedMessages];
-    }
 
     // Add memory context as system message
     if (memoryContext.length > 0) {
@@ -1194,16 +1141,94 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
 
     // Route to appropriate provider
     let response;
+    let toolsUsed = false;
     const providerType = provider || 'ollama';
+    console.log(`=== Routing to provider: ${providerType} ===`);
 
     if (providerType === 'ollama') {
       const host = getOllamaHost({ ollamaHost });
+      let ollamaMessages = [...enhancedMessages];
+
+      // MCP tool calling loop for Ollama
+      console.log(`MCP [ollama]: toolsEnabled=${toolsEnabled}, hasTools=${mcpClient.hasTools()}`);
+      if (toolsEnabled && mcpClient.hasTools()) {
+        const tools = mcpClient.getToolsForOpenAI();
+        const toolSearxngHost = searxngHost
+          ? (isValidOllamaHost(searxngHost) ? searxngHost : SEARXNG_HOST)
+          : SEARXNG_HOST;
+        const toolContext = { searxngHost: toolSearxngHost };
+        const MAX_TOOL_ROUNDS = 3;
+
+        console.log('MCP [ollama]: Starting tool loop, tools:', JSON.stringify(tools.map(t => t.function.name)));
+
+        for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+          console.log(`MCP [ollama]: Tool call round ${round + 1}/${MAX_TOOL_ROUNDS}`);
+
+          const toolResponse = await fetch(`${host}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model,
+              messages: ollamaMessages,
+              tools,
+              stream: false
+            }),
+            signal: AbortSignal.timeout(120000)
+          });
+
+          if (!toolResponse.ok) {
+            console.error(`MCP [ollama]: Tool call request failed with ${toolResponse.status}`);
+            break;
+          }
+
+          const toolData = await toolResponse.json();
+          console.log('MCP [ollama]: Response keys:', Object.keys(toolData));
+          console.log('MCP [ollama]: message.role:', toolData.message?.role);
+          console.log('MCP [ollama]: message.tool_calls:', JSON.stringify(toolData.message?.tool_calls || 'none'));
+          console.log('MCP [ollama]: message.content (first 100):', (toolData.message?.content || '').substring(0, 100));
+
+          if (!toolData.message?.tool_calls?.length) {
+            console.log('MCP [ollama]: No tool calls requested, proceeding to final response');
+            break;
+          }
+
+          toolsUsed = true;
+          const assistantMsg = toolData.message;
+          console.log(`MCP [ollama]: Model requested ${assistantMsg.tool_calls.length} tool call(s)`);
+
+          // Add assistant message with tool_calls
+          ollamaMessages.push(assistantMsg);
+
+          // Execute each tool call
+          for (const toolCall of assistantMsg.tool_calls) {
+            const fnName = toolCall.function.name;
+            // Ollama passes arguments as object, not JSON string
+            const args = typeof toolCall.function.arguments === 'string'
+              ? JSON.parse(toolCall.function.arguments)
+              : toolCall.function.arguments;
+            console.log(`MCP [ollama]: Executing tool "${fnName}" with args:`, JSON.stringify(args));
+
+            const result = await mcpClient.executeTool(fnName, args, toolContext);
+            console.log(`MCP [ollama]: Tool "${fnName}" result:`, JSON.stringify(result).substring(0, 200));
+
+            ollamaMessages.push({
+              role: 'tool',
+              content: typeof result === 'string' ? result : JSON.stringify(result)
+            });
+          }
+        }
+
+        if (toolsUsed) {
+          console.log('MCP [ollama]: Tools were used, making final streaming request');
+        }
+      }
+
       response = await fetch(`${host}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model,
-          messages: enhancedMessages,
+          messages: ollamaMessages,
           stream: true
         })
       });
@@ -1275,23 +1300,130 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
       });
     } else if (providerType === 'llamacpp') {
       const llamacppHost = req.body.llamacppHost || LLAMACPP_HOST;
+      let llamacppMessages = [...enhancedMessages];
+
+      // MCP tool calling loop (only when tools are enabled)
+      console.log(`MCP [llamacpp]: toolsEnabled=${toolsEnabled}, hasTools=${mcpClient.hasTools()}`);
+      if (toolsEnabled && mcpClient.hasTools()) {
+        const tools = mcpClient.getToolsForOpenAI();
+        const toolSearxngHost = searxngHost
+          ? (isValidOllamaHost(searxngHost) ? searxngHost : SEARXNG_HOST)
+          : SEARXNG_HOST;
+        const toolContext = { searxngHost: toolSearxngHost };
+        const MAX_TOOL_ROUNDS = 3;
+
+        console.log('MCP [llamacpp]: Starting tool loop, tools:', JSON.stringify(tools.map(t => t.function.name)));
+
+        for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+          console.log(`MCP [llamacpp]: Tool call round ${round + 1}/${MAX_TOOL_ROUNDS}`);
+
+          const toolResponse = await fetch(`${llamacppHost}/v1/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model,
+              stream: false,
+              messages: llamacppMessages,
+              tools
+            }),
+            signal: AbortSignal.timeout(120000) // 2 minute timeout per tool round
+          });
+
+          if (!toolResponse.ok) {
+            const errBody = await toolResponse.text().catch(() => '');
+            console.error(`MCP [llamacpp]: Tool call request failed with ${toolResponse.status}:`, errBody.substring(0, 200));
+            break;
+          }
+
+          const toolData = await toolResponse.json();
+          console.log('MCP [llamacpp]: Response keys:', Object.keys(toolData));
+          const choice = toolData.choices?.[0];
+          console.log('MCP [llamacpp]: finish_reason:', choice?.finish_reason);
+          console.log('MCP [llamacpp]: message.role:', choice?.message?.role);
+          console.log('MCP [llamacpp]: message.tool_calls:', JSON.stringify(choice?.message?.tool_calls || 'none'));
+          console.log('MCP [llamacpp]: message.content (first 100):', (choice?.message?.content || '').substring(0, 100));
+
+          if (!choice?.message?.tool_calls?.length) {
+            console.log('MCP [llamacpp]: No tool calls requested, proceeding to final response');
+            break;
+          }
+
+          toolsUsed = true;
+          const assistantMsg = choice.message;
+          console.log(`MCP [llamacpp]: Model requested ${assistantMsg.tool_calls.length} tool call(s)`);
+
+          // Add assistant message with tool_calls to conversation
+          // Preserve the exact message structure from llama-server
+          llamacppMessages.push(assistantMsg);
+
+          // Execute each tool call
+          for (const toolCall of assistantMsg.tool_calls) {
+            const fnName = toolCall.function.name;
+            console.log(`MCP [llamacpp]: Executing tool "${fnName}", raw arguments:`, toolCall.function.arguments);
+
+            let args;
+            try {
+              args = typeof toolCall.function.arguments === 'string'
+                ? JSON.parse(toolCall.function.arguments)
+                : toolCall.function.arguments;
+            } catch (e) {
+              console.warn(`MCP [llamacpp]: Failed to parse tool arguments: ${e.message}`);
+              args = {};
+            }
+            console.log(`MCP [llamacpp]: Parsed args:`, JSON.stringify(args));
+
+            const result = await mcpClient.executeTool(fnName, args, toolContext);
+            console.log(`MCP [llamacpp]: Tool "${fnName}" result:`, JSON.stringify(result).substring(0, 200));
+
+            llamacppMessages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id,
+              content: typeof result === 'string' ? result : JSON.stringify(result)
+            });
+          }
+        }
+
+        if (toolsUsed) {
+          console.log('MCP [llamacpp]: Tools were used, making final streaming request');
+          console.log('MCP [llamacpp]: Final messages array (' + llamacppMessages.length + ' messages):');
+          llamacppMessages.forEach((m, i) => {
+            const preview = typeof m.content === 'string' ? m.content.substring(0, 80) : String(m.content);
+            const extras = [];
+            if (m.tool_calls) extras.push(`tool_calls: ${m.tool_calls.length}`);
+            if (m.tool_call_id) extras.push(`tool_call_id: ${m.tool_call_id}`);
+            console.log(`  [${i}] role=${m.role} ${extras.length ? '(' + extras.join(', ') + ')' : ''} content="${preview}"`);
+          });
+        }
+      }
+
+      // Final streaming request
+      // When tools were used, include the tools param so llama-server
+      // accepts the tool_calls/tool messages in the conversation history
+      const finalBody = {
+        model,
+        stream: true,
+        messages: llamacppMessages
+      };
+      if (toolsUsed) {
+        finalBody.tools = mcpClient.getToolsForOpenAI();
+      }
+
+      console.log('MCP [llamacpp]: Final request body keys:', Object.keys(finalBody), 'tools included:', !!finalBody.tools);
+
       response = await fetch(`${llamacppHost}/v1/chat/completions`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model,
-          stream: true,
-          messages: enhancedMessages
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(finalBody)
       });
     } else {
       return res.status(400).json({ error: 'Unknown provider' });
     }
 
     if (!response.ok) {
-      throw new Error(`Provider returned ${response.status}`);
+      let errBody = '';
+      try { errBody = await response.text(); } catch (e) {}
+      console.error(`Provider ${providerType} returned ${response.status}:`, errBody.substring(0, 500));
+      throw new Error(`Provider returned ${response.status}: ${errBody.substring(0, 200)}`);
     }
 
     // Set up streaming response
@@ -1299,7 +1431,7 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
     res.setHeader('Content-Type', contentType);
     res.setHeader('X-Conversation-Id', convoId);
     res.setHeader('X-Has-Memory-Context', memoryContext.length > 0 ? 'true' : 'false');
-    res.setHeader('X-Has-Search-Results', searchResults.length > 0 ? 'true' : 'false');
+    res.setHeader('X-Tools-Used', toolsUsed ? 'true' : 'false');
 
     if (contentType === 'text/event-stream') {
       res.setHeader('Cache-Control', 'no-cache');
@@ -1442,6 +1574,7 @@ app.listen(PORT, () => {
   console.log('Conversation features:');
   console.log('  - Chat history: SQLite');
   console.log('  - Semantic memory: LanceDB');
+  console.log(`  - MCP tools: ${mcpClient.hasTools() ? mcpClient.getToolNames().join(', ') : 'None'}`);
   if (ALLOWED_OLLAMA_HOSTS.length > 0) {
     console.log(`  - Additional Ollama hosts: ${ALLOWED_OLLAMA_HOSTS.join(', ')}`);
   }

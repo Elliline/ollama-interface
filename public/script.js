@@ -43,7 +43,7 @@ let isRecording = false;
 let mediaRecorder = null;
 let audioChunks = [];
 let conversationMode = false;
-let searchEnabled = false;
+let toolsEnabled = false;
 let silenceTimer = null;
 let audioContext = null;
 let analyser = null;
@@ -274,7 +274,7 @@ function setupEventListeners() {
   messageInput.addEventListener('input', autoResizeInput);
   micBtn.addEventListener('mousedown', startRecording);
   convoModeBtn.addEventListener('click', toggleConversationMode);
-  searchToggleBtn.addEventListener('click', toggleSearch);
+  searchToggleBtn.addEventListener('click', toggleTools);
   micBtn.addEventListener('mouseup', stopRecording);
   micBtn.addEventListener('mouseleave', stopRecording);
   speakerToggle.addEventListener('click', toggleTTS);
@@ -363,21 +363,24 @@ async function sendMessage() {
           ? localStorage.getItem('grokApiKey')
           : undefined;
 
+    const requestBody = {
+      model: currentModel,
+      messages: conversationMessages,
+      provider: currentProvider,
+      conversation_id: currentConversationId,
+      ollamaHost,
+      squatchserveHost,
+      llamacppHost,
+      apiKey,
+      toolsEnabled,
+      searxngHost: localStorage.getItem('searxngHost') || undefined
+    };
+    console.log('[sendMessage] Provider:', currentProvider, '| toolsEnabled:', toolsEnabled, '(type:', typeof toolsEnabled, ')');
+
     response = await fetch('/api/chat/memory', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: currentModel,
-        messages: conversationMessages,
-        provider: currentProvider,
-        conversation_id: currentConversationId,
-        ollamaHost,
-        squatchserveHost,
-        llamacppHost,
-        apiKey,
-        searchEnabled,
-        searxngHost: localStorage.getItem('searxngHost') || undefined
-      })
+      body: JSON.stringify(requestBody)
     });
 
     // SECURITY FIX: Check if response exists before accessing properties
@@ -403,10 +406,10 @@ async function sendMessage() {
       showMemoryIndicator();
     }
 
-    // Show search results indicator if applicable
-    const hasSearchResults = response.headers.get('X-Has-Search-Results') === 'true';
-    if (hasSearchResults) {
-      showSearchIndicator();
+    // Show tools indicator if applicable
+    const usedTools = response.headers.get('X-Tools-Used') === 'true';
+    if (usedTools) {
+      showToolsIndicator();
     }
 
     // Handle streaming response
@@ -487,11 +490,11 @@ function showMemoryIndicator() {
   }, 5000);
 }
 
-// Show search results indicator
-function showSearchIndicator() {
+// Show tools usage indicator
+function showToolsIndicator() {
   const indicator = document.createElement('div');
   indicator.className = 'search-results-indicator';
-  indicator.textContent = 'Enhanced with web search results';
+  indicator.textContent = 'Enhanced with tool results';
   messagesContainer.appendChild(indicator);
 
   setTimeout(() => {
@@ -867,11 +870,11 @@ function toggleTTS() {
   }
 }
 
-// Search Toggle
-function toggleSearch() {
-  searchEnabled = !searchEnabled;
-  searchToggleBtn.textContent = searchEnabled ? '🌐' : '🔍';
-  searchToggleBtn.classList.toggle('enabled', searchEnabled);
+// Tools Toggle (enables AI tool use like web search)
+function toggleTools() {
+  toolsEnabled = !toolsEnabled;
+  searchToggleBtn.textContent = toolsEnabled ? '🔧' : '🔍';
+  searchToggleBtn.classList.toggle('enabled', toolsEnabled);
 }
 
 // Recording functions

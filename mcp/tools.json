@@ -1,0 +1,10 @@
+{
+  "tools": [
+    {
+      "name": "searxng",
+      "enabled": true,
+      "endpoint": "http://192.168.4.97:8888",
+      "description": "Web search via SearXNG"
+    }
+  ]
+}
