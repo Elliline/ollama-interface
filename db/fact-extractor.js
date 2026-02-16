@@ -378,14 +378,35 @@ function parseFactsFromResponse(response) {
       return [];
     }
 
-    // Filter out empty strings, non-strings, and facts about the assistant
+    // Filter out empty strings, non-strings, and non-personal facts
     return facts.filter(f => {
       if (typeof f !== 'string' || f.trim().length === 0) return false;
+      const t = f.trim();
+
       // Reject facts where the assistant is the subject — these are hallucinations
-      if (/^(the )?assistant\b/i.test(f.trim())) {
+      if (/^(the )?assistant\b/i.test(t)) {
         console.log(`[FactExtractor] Filtered out assistant-subject fact: "${f}"`);
         return false;
       }
+
+      // Reject "User should be aware/know" — these are AI-provided info, not user facts
+      if (/^user should (be aware|know)\b/i.test(t)) {
+        console.log(`[FactExtractor] Filtered out AI-advice fact: "${f}"`);
+        return false;
+      }
+
+      // Reject date citations from news/web results (e.g. "as of February 16, 2026")
+      if (/\b(as of|on) [A-Z][a-z]+ \d{1,2},?\s*\d{4}\b/i.test(t)) {
+        console.log(`[FactExtractor] Filtered out dated news item: "${f}"`);
+        return false;
+      }
+
+      // Reject external/web-search content patterns
+      if (/\b(study published|according to|trend featuring|organizations are reporting|journal of)\b/i.test(t)) {
+        console.log(`[FactExtractor] Filtered out external info: "${f}"`);
+        return false;
+      }
+
       return true;
     });
 
