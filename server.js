@@ -16,6 +16,10 @@ const db = require('./db/database');
 // Fact extraction and memory
 const factExtractor = require('./db/fact-extractor');
 
+// Memory flush and clustering
+const memoryFlush = require('./db/memory-flush');
+const memoryClusters = require('./db/memory-clusters');
+
 // MCP tool calling
 const MCPClient = require('./mcp/mcp-client');
 
@@ -1124,6 +1128,20 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
       // Continue without memory - not a fatal error
     }
 
+    // === UPGRADE 4: Cluster-aware memory retrieval ===
+    let clusterContext = [];
+    try {
+      clusterContext = await memoryClusters.searchClusters(userMessage.content, 3);
+      if (clusterContext.length > 0) {
+        console.log(`Cluster search: ${clusterContext.length} relevant clusters found`);
+        clusterContext.forEach((c, i) => {
+          console.log(`  Cluster ${i + 1}: "${c.cluster.name}" (${c.members.length} members, ${c.linkedMembers.length} linked)`);
+        });
+      }
+    } catch (clusterError) {
+      console.error('Cluster search error:', clusterError.message);
+    }
+
     // Build messages array with memory context injected
     let enhancedMessages = [...messages];
 
@@ -1154,6 +1172,22 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
       memoryParts.push(`=== Relevant Past Conversations ===\n${contextText}`);
     }
 
+    // Add cluster-aware memory context
+    if (clusterContext.length > 0) {
+      const clusterText = clusterContext.map(c => {
+        const memberText = c.members.map(m => `- ${m.content}`).join('\n');
+        let text = `[${c.cluster.name}]\n${memberText}`;
+        if (c.linkedMembers.length > 0) {
+          const linkedText = c.linkedMembers
+            .map(lm => `- (from ${lm.clusterName}) ${lm.content}`)
+            .join('\n');
+          text += `\nRelated:\n${linkedText}`;
+        }
+        return text;
+      }).join('\n\n');
+      memoryParts.push(`=== Associated Memory Clusters ===\n${clusterText}`);
+    }
+
     if (memoryParts.length > 0) {
       console.log('Injecting memory context:', memoryParts.length, 'sections');
       const memorySystemMessage = {
@@ -1180,10 +1214,26 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
       console.log(`=== (total length: ${systemMsg.content.length} chars) ===`);
     }
 
+    // === UPGRADE 3: Memory flush before context overflow ===
+    const providerType = provider || 'ollama';
+    const providerHost = providerType === 'llamacpp' ? (req.body.llamacppHost || LLAMACPP_HOST)
+      : providerType === 'squatchserve' ? (req.body.squatchserveHost || SQUATCHSERVE_HOST)
+      : (ollamaHost || OLLAMA_HOST);
+    const providerKey = apiKey || (providerType === 'claude' ? CLAUDE_API_KEY : providerType === 'grok' ? GROK_API_KEY : providerType === 'openai' ? OPENAI_API_KEY : '');
+
+    try {
+      const flushResult = await memoryFlush.checkAndFlush(enhancedMessages, providerType, model, providerKey, providerHost);
+      if (flushResult.flushed) {
+        console.log(`[MemoryFlush] Context was flushed — compacted from ${enhancedMessages.length} to ${flushResult.messages.length} messages`);
+        enhancedMessages = flushResult.messages;
+      }
+    } catch (flushError) {
+      console.error('[MemoryFlush] Flush check error:', flushError.message);
+    }
+
     // Route to appropriate provider
     let response;
     let toolsUsed = false;
-    const providerType = provider || 'ollama';
     console.log(`=== Routing to provider: ${providerType} ===`);
 
     if (providerType === 'ollama') {
@@ -1479,7 +1529,8 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
       memoryFiles.user ? 'user-profile' : null,
       memoryFiles.dailyToday ? 'daily-today' : null,
       memoryFiles.dailyYesterday ? 'daily-yesterday' : null,
-      memoryContext.length > 0 ? `${memoryContext.length}-conversations` : null
+      memoryContext.length > 0 ? `${memoryContext.length}-conversations` : null,
+      clusterContext.length > 0 ? `${clusterContext.length}-clusters` : null
     ].filter(Boolean);
     res.setHeader('X-Memory-Sources', memorySources.join(',') || 'none');
 
@@ -1580,12 +1631,6 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
       }
 
       // === UPGRADE 1: Async fact extraction (non-blocking) ===
-      // Determine the correct host for local providers
-      const providerHost = providerType === 'llamacpp' ? (req.body.llamacppHost || LLAMACPP_HOST)
-        : providerType === 'squatchserve' ? (req.body.squatchserveHost || SQUATCHSERVE_HOST)
-        : (ollamaHost || OLLAMA_HOST);
-      const providerKey = apiKey || (providerType === 'claude' ? CLAUDE_API_KEY : providerType === 'grok' ? GROK_API_KEY : providerType === 'openai' ? OPENAI_API_KEY : '');
-
       factExtractor.processFactExtraction(
         userMessage.content,
         fullResponse,
@@ -1644,6 +1689,8 @@ app.listen(PORT, () => {
   console.log('  - Semantic memory: LanceDB (vector) + SQLite FTS5 (BM25)');
   console.log('  - Hybrid search: 0.6 vector + 0.4 BM25');
   console.log('  - Fact extraction: Auto-extract after each exchange');
+  console.log('  - Memory flush: Auto-compact at 80% context usage');
+  console.log('  - Memory clusters: Associative cluster-aware retrieval');
   console.log(`  - Memory files: data/memory/ (MEMORY.md, USER.md, daily/)`);
   console.log(`  - MCP tools: ${mcpClient.hasTools() ? mcpClient.getToolNames().join(', ') : 'None'}`);
   if (ALLOWED_OLLAMA_HOSTS.length > 0) {

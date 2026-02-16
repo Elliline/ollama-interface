@@ -634,6 +634,17 @@ async function processFactExtraction(userMessage, assistantMessage, provider, mo
     if (facts.length > 0) {
       const memoryFile = path.join(memoryDir, 'MEMORY.md');
       await appendToMemory(facts, memoryFile);
+
+      // === UPGRADE 4: Assign facts to memory clusters ===
+      try {
+        const memoryClusters = require('./memory-clusters');
+        for (const fact of facts) {
+          await memoryClusters.assignToCluster(fact, provider, model, apiKey, ollamaHost, 'fact-extraction');
+        }
+        console.log(`[FactExtractor] Assigned ${facts.length} facts to clusters`);
+      } catch (clusterError) {
+        console.error('[FactExtractor] Cluster assignment error:', clusterError.message);
+      }
     }
 
     // Create daily log summary

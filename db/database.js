@@ -28,6 +28,7 @@ function ensureDirectories() {
 let sqliteDb = null;
 let vectorDb = null;
 let embeddingsTable = null;
+let clusterEmbeddingsTable = null;
 
 // ============ SQLite Setup ============
 
@@ -86,6 +87,45 @@ function initDatabase() {
         conversation_id UNINDEXED,
         message_id UNINDEXED
       )
+    `);
+
+    // === UPGRADE 4: Memory Clustering tables ===
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS memory_clusters (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS cluster_members (
+        id TEXT PRIMARY KEY,
+        cluster_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        source TEXT,
+        importance REAL DEFAULT 0.5,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (cluster_id) REFERENCES memory_clusters(id)
+      )
+    `);
+
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS cluster_links (
+        id TEXT PRIMARY KEY,
+        cluster_a TEXT NOT NULL,
+        cluster_b TEXT NOT NULL,
+        strength REAL DEFAULT 0.5,
+        FOREIGN KEY (cluster_a) REFERENCES memory_clusters(id),
+        FOREIGN KEY (cluster_b) REFERENCES memory_clusters(id)
+      )
+    `);
+
+    sqliteDb.exec(`
+      CREATE INDEX IF NOT EXISTS idx_cluster_members_cluster_id
+      ON cluster_members(cluster_id)
     `);
 
     console.log('SQLite database initialized successfully');
@@ -349,6 +389,23 @@ async function initVectorStore() {
       await embeddingsTable.delete('id = "' + sampleData[0].id + '"');
 
       console.log('LanceDB: Created new message_embeddings table');
+    }
+
+    // === UPGRADE 4: Cluster embeddings table ===
+    if (tableNames.includes('cluster_embeddings')) {
+      clusterEmbeddingsTable = await vectorDb.openTable('cluster_embeddings');
+      console.log('LanceDB: Opened existing cluster_embeddings table');
+    } else {
+      const sampleCluster = [{
+        id: randomUUID(),
+        member_id: 'sample',
+        cluster_id: 'sample',
+        content: 'Sample cluster text',
+        vector: Array(768).fill(0)
+      }];
+      clusterEmbeddingsTable = await vectorDb.createTable('cluster_embeddings', sampleCluster);
+      await clusterEmbeddingsTable.delete('id = "' + sampleCluster[0].id + '"');
+      console.log('LanceDB: Created new cluster_embeddings table');
     }
 
     return embeddingsTable;
@@ -817,6 +874,11 @@ function loadMemoryFiles(memoryDir = path.join(__dirname, '../data/memory')) {
   }
 }
 
+// ============ Accessors for sub-modules ============
+
+function getSqliteDb() { return sqliteDb; }
+function getClusterEmbeddingsTable() { return clusterEmbeddingsTable; }
+
 // ============ Exports ============
 
 module.exports = {
@@ -845,5 +907,9 @@ module.exports = {
   backfillFTS,
 
   // Memory files
-  loadMemoryFiles
+  loadMemoryFiles,
+
+  // Accessors for sub-modules
+  getSqliteDb,
+  getClusterEmbeddingsTable
 };
