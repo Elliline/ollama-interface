@@ -1244,6 +1244,20 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
       const host = getOllamaHost({ ollamaHost });
       let ollamaMessages = [...enhancedMessages];
 
+      // Ollama tool calling is strict about message format — consolidate
+      // all system messages into a single one at position 0 so the memory
+      // context doesn't create extra messages that break the tool schema
+      if (toolsEnabled) {
+        const systemMsgs = ollamaMessages.filter(m => m.role === 'system');
+        const nonSystemMsgs = ollamaMessages.filter(m => m.role !== 'system');
+        if (systemMsgs.length > 0) {
+          ollamaMessages = [
+            { role: 'system', content: systemMsgs.map(m => m.content).join('\n\n') },
+            ...nonSystemMsgs
+          ];
+        }
+      }
+
       // MCP tool calling loop for Ollama
       console.log(`MCP [ollama]: toolsEnabled=${toolsEnabled}, hasTools=${mcpClient.hasTools()}`);
       if (toolsEnabled && mcpClient.hasTools()) {

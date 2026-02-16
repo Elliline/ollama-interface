@@ -100,24 +100,27 @@ async function extractFacts(userMessage, assistantMessage, provider, model, apiK
   try {
     console.log(`[FactExtractor] Extracting facts using ${provider}/${model}`);
 
-    const systemPrompt = `You are a fact extraction system. Extract factual information from this chat exchange that should be remembered long-term.
+    const systemPrompt = `You are a fact extraction system. Extract facts about the USER from what the USER said in the chat exchange below.
 
 RULES:
 - Return ONLY a valid JSON array of strings, or [] if nothing worth remembering.
 - Each fact MUST be a complete, self-contained sentence with full context.
-- Include: names, preferences, technical specs, relationships, decisions, project details.
+- Only extract facts that the USER has stated about themselves, their life, their preferences, or their projects.
+- Do NOT extract general knowledge, web search results, trivia, or information the AI provided.
+- Do NOT extract facts from the Assistant's response — only from what the User said.
+- Include: names, preferences, technical specs, relationships, decisions, project details the user mentions.
 - Do NOT include: greetings, casual chat, temporary context, questions without answers.
-- NEVER attribute facts to "Assistant" — all facts should be about the User. Write "User has..." not "Assistant has...".
+- Write facts as "User has..." or "User prefers..." — never "Assistant has...".
 
-GOOD examples (complete, contextual sentences):
+GOOD examples (facts the user stated about themselves):
 ["User has 4 dogs: Casper, Cece, Calypso, and Erika", "User is migrating from Syncro to Kaseya for RMM", "User's AI server has dual RTX 3090s with 48GB total VRAM"]
 
-BAD examples (bare words, fragments, or incomplete):
-["Casper", "dogs", "RTX 3090", "migrating"]
+BAD examples (AI-provided info, fragments, or general knowledge):
+["A viral TikTok trend featuring Mini Huskies", "Constantinople fell in 1453", "RTX 3090", "The weather is nice"]
 
-Every extracted fact must make sense on its own without any other context.`;
+Every extracted fact must be something the USER told you, not something you told the user.`;
 
-    const exchange = `User: ${userMessage}\n\nAssistant: ${assistantMessage}`;
+    const exchange = `USER MESSAGE:\n${userMessage}\n\nASSISTANT RESPONSE (for context only — do NOT extract facts from this):\n${assistantMessage}`;
 
     let response;
     const controller = new AbortController();
@@ -334,7 +337,7 @@ async function extractFromSquatchServe(systemPrompt, exchange, model, host, sign
 }
 
 /**
- * Parse facts from LLM response (handles markdown code blocks)
+ * Parse facts from LLM response (handles markdown code blocks and Python-style arrays)
  */
 function parseFactsFromResponse(response) {
   try {
@@ -345,7 +348,31 @@ function parseFactsFromResponse(response) {
       return [];
     }
 
-    const facts = JSON.parse(jsonMatch[0]);
+    let jsonStr = jsonMatch[0];
+
+    // Try parsing as valid JSON first
+    let facts;
+    try {
+      facts = JSON.parse(jsonStr);
+    } catch (parseErr) {
+      // Handle Python-style single-quoted arrays: ['fact', 'fact']
+      // Convert structural single quotes to double quotes while preserving
+      // apostrophes inside strings (e.g. "User's name")
+      console.log('[FactExtractor] JSON parse failed, trying Python-style fixup');
+      jsonStr = jsonStr
+        .replace(/\[\s*'/g, '["')           // [' → ["
+        .replace(/'\s*\]/g, '"]')           // '] → "]
+        .replace(/'\s*,\s*'/g, '", "')     // ', ' → ", "
+        .replace(/'\s*,\s*"/g, '", "')     // ', " → ", "
+        .replace(/"\s*,\s*'/g, '", "');    // ", ' → ", "
+      try {
+        facts = JSON.parse(jsonStr);
+      } catch (retryErr) {
+        console.error('[FactExtractor] Python-style fixup also failed:', retryErr.message);
+        return [];
+      }
+    }
+
     if (!Array.isArray(facts)) {
       console.log('[FactExtractor] Parsed JSON is not an array');
       return [];

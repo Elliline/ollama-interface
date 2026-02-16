@@ -614,29 +614,31 @@ function backfillFTS() {
 }
 
 /**
- * Sanitize FTS5 query to prevent MATCH syntax errors
+ * Sanitize FTS5 query to prevent MATCH syntax errors and column-name injection.
+ * Wraps each term in double quotes so FTS5 treats them as literal strings
+ * instead of interpreting them as column names or operators.
  * @param {string} query - Raw query string
- * @returns {string} Sanitized query
+ * @returns {string} Sanitized query safe for FTS5 MATCH
  */
 function sanitizeFTSQuery(query) {
   if (!query || typeof query !== 'string') {
-    return '';
+    return '"search"';
   }
 
-  // Remove FTS5 special characters that can break MATCH
-  // Keep: letters, numbers, spaces, hyphens, underscores
-  // Remove: quotes, colons, asterisks, parentheses, etc.
-  let sanitized = query
-    .replace(/[^\w\s\-]/g, ' ') // Replace special chars with spaces
-    .replace(/\s+/g, ' ')        // Collapse multiple spaces
-    .trim();
+  // Strip everything except word chars, spaces, and hyphens
+  const cleaned = query.replace(/[^\w\s\-]/g, ' ');
 
-  // If query is empty after sanitization, return a safe default
-  if (!sanitized) {
-    return 'search'; // Fallback query that won't break FTS5
+  // Split into individual terms, quote each one for FTS5 safety
+  const terms = cleaned
+    .split(/\s+/)
+    .filter(w => w.length > 0)
+    .map(w => '"' + w.replace(/"/g, '') + '"');
+
+  if (terms.length === 0) {
+    return '"search"';
   }
 
-  return sanitized;
+  return terms.join(' ');
 }
 
 /**
