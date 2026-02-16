@@ -175,58 +175,147 @@ function extractNameFromFact(fact) {
   return words.slice(0, 3).map(titleCase).join(' ').substring(0, 50);
 }
 
+// Simple plural/suffix stemming: dogs→dog, cats→cat, gaming→game, etc.
+function stemWord(word) {
+  const w = word.toLowerCase();
+  if (w.endsWith('ies') && w.length > 4) return w.slice(0, -3) + 'y'; // batteries→battery
+  if (w.endsWith('ses') && w.length > 4) return w.slice(0, -2);       // buses→bus
+  if (w.endsWith('ing') && w.length > 5) return w.slice(0, -3);       // gaming→gam → handled by map
+  if (w.endsWith('tion') && w.length > 5) return w;                   // keep as-is
+  if (w.endsWith('s') && !w.endsWith('ss') && w.length > 3) return w.slice(0, -1); // dogs→dog
+  return w;
+}
+
+// Curated name map: if top stemmed words contain any key set → use that label
+const CLUSTER_NAME_MAP = [
+  { keys: ['dog', 'cat', 'pet', 'dragon', 'bearded', 'animal'], name: 'Pets & Animals' },
+  { keys: ['wayne', 'eric', 'ellie', 'father', 'partner', 'family', 'wife', 'husband', 'brother', 'sister', 'kid', 'children'], name: 'People & Family' },
+  { keys: ['battletech', 'mech', 'marauder', 'game', 'strategy', 'robot'], name: 'Gaming' },
+  { keys: ['server', 'vram', 'gpu', 'cpu', 'ram', 'rtx', 'nvidia', 'amd', 'hardware', 'linux', 'garuda', 'strix', 'halo', 'ubiquiti', 'network', 'infrastructure'], name: 'Hardware & Infrastructure' },
+  { keys: ['client', 'mettasphere', 'kaseya', 'syncro', 'msp', 'business', 'endpoint', 'autotask', 'rmm', 'psa', 'migrat', 'managed', 'service', 'provider', 'subscriptions', 'self-hosted', 'local-first'], name: 'Business & MSP', minHits: 1 },
+  { keys: ['constantinople', 'opera', 'song', 'lyric', 'aria', 'arioso', 'recitative', 'hagia', 'sophia', 'chorus', 'mosaic'], name: 'Creative Projects' },
+  { keys: ['story', 'fiction', 'transylvania', 'flee', 'journey', 'novel', 'young', 'woman'], name: 'Story & Fiction' },
+  { keys: ['ai', 'ollama', 'llama', 'model', 'embedding', 'cluster', 'memory', 'coastal', 'squatch'], name: 'AI & Projects' },
+  { keys: ['self-hosted', 'local', 'philosophy', 'build', 'prefer'], name: 'Preferences & Philosophy' },
+  { keys: ['code', 'python', 'javascript', 'programming', 'software', 'docker', 'kubernetes', 'api', 'database'], name: 'Software & Dev' },
+  { keys: ['music', 'band', 'guitar', 'piano', 'album'], name: 'Music' },
+  { keys: ['food', 'cooking', 'homebrew', 'beer', 'recipe'], name: 'Food & Drink' },
+];
+
 /**
  * Generate a cluster name from all its members using word frequency analysis
+ * with root-word deduplication and curated name map fallback
  * @param {Array} members - Array of {content} objects
- * @returns {string} - Generated cluster name (2-3 words, Title Case)
+ * @returns {string} - Generated cluster name
  */
 function generateClusterNameFromMembers(members) {
   if (!members || members.length === 0) return 'General';
 
-  // Concatenate all member content
   const allText = members.map(m => m.content || m).join(' ');
 
-  // Domain-specific boosters - words that are more meaningful for cluster names
-  const boosters = new Set([
-    'server', 'game', 'gaming', 'pet', 'pets', 'dog', 'dogs', 'cat', 'cats',
-    'music', 'song', 'band', 'guitar', 'piano', 'linux', 'windows', 'mac',
-    'python', 'javascript', 'code', 'coding', 'programming', 'ai', 'model',
-    'network', 'docker', 'kubernetes', 'database', 'sql', 'api',
-    'family', 'wife', 'husband', 'kids', 'children', 'brother', 'sister',
-    'work', 'job', 'company', 'project', 'business', 'client', 'msp',
-    'gpu', 'cpu', 'ram', 'vram', 'nvidia', 'amd', 'intel',
-    'ollama', 'llama', 'battletech', 'constantinople', 'story', 'fiction',
-    'writing', 'book', 'novel', 'homebrew', 'beer', 'cooking', 'food',
-    'car', 'truck', 'vehicle', 'house', 'home', 'apartment',
-    'hardware', 'software', 'migration', 'deployment', 'infrastructure'
-  ]);
-
-  // Word frequency analysis
-  const freq = {};
-  const words = allText.split(/\s+/)
+  // Tokenize and stem (split on whitespace and / to handle "local/self-hosted" etc.)
+  const rawWords = allText.split(/[\s/]+/)
     .map(w => w.replace(/[^a-zA-Z0-9-]/g, '').toLowerCase())
     .filter(w => w.length > 2 && !STOP_WORDS.has(w));
 
-  for (const word of words) {
-    freq[word] = (freq[word] || 0) + 1;
+  // Group by stem, accumulate counts under the canonical (most frequent) form
+  const stemGroups = {}; // stem → { forms: {word: count}, total: N }
+  for (const word of rawWords) {
+    const stem = stemWord(word);
+    if (!stemGroups[stem]) stemGroups[stem] = { forms: {}, total: 0 };
+    stemGroups[stem].forms[word] = (stemGroups[stem].forms[word] || 0) + 1;
+    stemGroups[stem].total++;
   }
 
-  // Score each word: frequency + domain boost
-  const scored = Object.entries(freq).map(([word, count]) => ({
-    word,
-    score: count + (boosters.has(word) ? 3 : 0)
-  }));
+  // Build a set of all stems present for curated map matching
+  const allStems = new Set(Object.keys(stemGroups));
+  // Also add the raw words themselves (for partial matches like "migrat" in "migrating")
+  for (const word of rawWords) allStems.add(word);
 
-  // Sort by score descending
+  // Try curated name map first: check if any map entry's keys overlap with our stems
+  let bestMapMatch = null;
+  let bestMapScore = 0;
+  let bestMapMinHits = 2;
+  for (const entry of CLUSTER_NAME_MAP) {
+    let hits = 0;
+    for (const key of entry.keys) {
+      // Check exact stem match or if any stem starts with the key (for partial stems)
+      for (const stem of allStems) {
+        if (stem === key || stem.startsWith(key) || key.startsWith(stem)) {
+          hits++;
+          break;
+        }
+      }
+    }
+    const entryMinHits = entry.minHits || 2;
+    if (hits > bestMapScore) {
+      bestMapScore = hits;
+      bestMapMatch = entry.name;
+      bestMapMinHits = entryMinHits;
+    }
+  }
+
+  // Use curated name if we got enough keyword hits (per-entry minHits, default 2)
+  if (bestMapMatch && bestMapScore >= bestMapMinHits) {
+    return bestMapMatch;
+  }
+
+  // Fall back to word frequency for novel clusters
+  // Pick the most frequent form from each stem group
+  const scored = Object.entries(stemGroups).map(([stem, group]) => {
+    // Find the most common surface form for display
+    const bestForm = Object.entries(group.forms)
+      .sort((a, b) => b[1] - a[1])[0][0];
+    return { word: bestForm, score: group.total };
+  });
+
   scored.sort((a, b) => b.score - a.score);
-
   if (scored.length === 0) return 'General';
 
-  // Take top 2-3 unique words
+  // If curated map had 1 hit, use it as a prefix hint
   const titleCase = w => w.charAt(0).toUpperCase() + w.slice(1);
   const topWords = scored.slice(0, 3).map(s => titleCase(s.word));
-
   return topWords.join(' ').substring(0, 50);
+}
+
+/**
+ * Match a single text against curated categories (for singleton merge)
+ * @param {string} text - Text to match
+ * @returns {string|null} - Category name or null if no match
+ */
+function matchCuratedCategory(text) {
+  const words = text.toLowerCase().split(/[\s/]+/)
+    .map(w => w.replace(/[^a-zA-Z0-9-]/g, ''))
+    .filter(w => w.length > 2);
+
+  const stems = new Set();
+  for (const word of words) {
+    stems.add(word);
+    stems.add(stemWord(word));
+  }
+
+  let bestMatch = null;
+  let bestScore = 0;
+  let bestMinHits = 2;
+  for (const entry of CLUSTER_NAME_MAP) {
+    let hits = 0;
+    for (const key of entry.keys) {
+      for (const stem of stems) {
+        if (stem === key || stem.startsWith(key) || key.startsWith(stem)) {
+          hits++;
+          break;
+        }
+      }
+    }
+    const entryMinHits = entry.minHits || 2;
+    if (hits >= entryMinHits && hits > bestScore) {
+      bestScore = hits;
+      bestMatch = entry.name;
+      bestMinHits = entryMinHits;
+    }
+  }
+
+  return bestMatch;
 }
 
 /**
@@ -668,12 +757,31 @@ function getCluster(id) {
   }
 }
 
+// Known person names for people-cluster detection
+const PERSON_NAMES = new Set([
+  'wayne', 'eric', 'ellie', 'casper', 'cece', 'calypso', 'erika', 'piff',
+  'lucy', 'grey'
+]);
+
+/**
+ * Check if a fact is about a person (contains known names or family terms)
+ * @param {string} text - Fact text
+ * @returns {boolean}
+ */
+function isPersonFact(text) {
+  const lower = text.toLowerCase();
+  for (const name of PERSON_NAMES) {
+    if (lower.includes(name)) return true;
+  }
+  return /\b(father|mother|partner|wife|husband|son|daughter|brother|sister|cares?\s+for)\b/i.test(text);
+}
+
 /**
  * Merge singleton clusters into the most similar non-singleton cluster
- * @param {number} threshold - Minimum similarity to merge (default 0.45)
+ * @param {number} threshold - Minimum similarity to merge (default 0.50)
  * @returns {Promise<number>} - Number of singletons merged
  */
-async function mergeSingletons(threshold = 0.45) {
+async function mergeSingletons(threshold = 0.50) {
   try {
     const db = getSqliteDb();
     if (!db) return 0;
@@ -692,21 +800,41 @@ async function mergeSingletons(threshold = 0.45) {
       return 0;
     }
 
-    // Find non-singleton cluster IDs
+    // Find non-singleton cluster IDs and their names
     const nonSingletons = db.prepare(`
-      SELECT mc.id
+      SELECT mc.id, mc.name
       FROM memory_clusters mc
       JOIN cluster_members cm ON cm.cluster_id = mc.id
       GROUP BY mc.id
       HAVING COUNT(cm.id) > 1
-    `).all().map(r => r.id);
+    `).all();
 
     if (nonSingletons.length === 0) {
       console.log('[Clusters] No non-singleton clusters to merge into');
       return 0;
     }
 
-    const nonSingletonSet = new Set(nonSingletons);
+    const nonSingletonSet = new Set(nonSingletons.map(r => r.id));
+
+    // Find or identify a "People" cluster among non-singletons
+    let peopleClusterId = null;
+    for (const ns of nonSingletons) {
+      if (/people|family|person/i.test(ns.name)) {
+        peopleClusterId = ns.id;
+        break;
+      }
+    }
+    // Also check if any non-singleton has person-related members
+    if (!peopleClusterId) {
+      for (const ns of nonSingletons) {
+        const members = db.prepare('SELECT content FROM cluster_members WHERE cluster_id = ?').all(ns.id);
+        if (members.some(m => isPersonFact(m.content))) {
+          peopleClusterId = ns.id;
+          break;
+        }
+      }
+    }
+
     const clusterTable = await getClusterEmbeddingsTable();
     if (!clusterTable) {
       console.log('[Clusters] Cluster embeddings table not available');
@@ -716,11 +844,53 @@ async function mergeSingletons(threshold = 0.45) {
     let merged = 0;
 
     for (const singleton of singletons) {
-      // Generate embedding for singleton content
+      const factIsPerson = isPersonFact(singleton.content);
+
+      // If this is a person fact and we have a people cluster, prefer that
+      if (factIsPerson && peopleClusterId && peopleClusterId !== singleton.cluster_id) {
+        const targetCluster = db.prepare('SELECT name FROM memory_clusters WHERE id = ?')
+          .get(peopleClusterId);
+
+        console.log(`[Clusters] Merging person-fact singleton "${singleton.name}" → "${targetCluster?.name}" (person-name match)`);
+
+        // Generate embedding for LanceDB update
+        const embedding = await generateEmbedding(singleton.content);
+        const vectorArray = embedding ? Array.from(embedding) : null;
+
+        // Move member to people cluster
+        db.prepare('UPDATE cluster_members SET cluster_id = ? WHERE id = ?')
+          .run(peopleClusterId, singleton.member_id);
+
+        if (vectorArray) {
+          try {
+            await clusterTable.delete(`member_id = "${singleton.member_id}"`);
+            await clusterTable.add([{
+              id: randomUUID(),
+              member_id: singleton.member_id,
+              cluster_id: peopleClusterId,
+              content: singleton.content,
+              vector: vectorArray
+            }]);
+          } catch (lanceErr) {
+            console.error('[Clusters] LanceDB update error during merge:', lanceErr.message);
+          }
+        }
+
+        db.prepare('DELETE FROM cluster_links WHERE cluster_a = ? OR cluster_b = ?')
+          .run(singleton.cluster_id, singleton.cluster_id);
+        db.prepare('DELETE FROM memory_clusters WHERE id = ?')
+          .run(singleton.cluster_id);
+        db.prepare('UPDATE memory_clusters SET updated_at = ? WHERE id = ?')
+          .run(new Date().toISOString(), peopleClusterId);
+
+        merged++;
+        continue;
+      }
+
+      // Standard embedding-based merge
       const embedding = await generateEmbedding(singleton.content);
       if (!embedding) continue;
 
-      // Search for similar content in cluster_embeddings
       const vectorArray = Array.from(embedding);
       const results = await clusterTable
         .search(vectorArray)
@@ -744,6 +914,7 @@ async function mergeSingletons(threshold = 0.45) {
       }
 
       if (!bestClusterId || bestSimilarity < threshold) {
+        console.log(`[Clusters] Keeping singleton "${singleton.name}" (best: ${bestSimilarity.toFixed(3)} < ${threshold})`);
         continue;
       }
 
@@ -783,7 +954,88 @@ async function mergeSingletons(threshold = 0.45) {
       merged++;
     }
 
-    console.log(`[Clusters] Merged ${merged}/${singletons.length} singletons`);
+    // --- Second pass: category-based merge for remaining singletons ---
+    // Re-query singletons that survived the embedding pass
+    const remainingSingletons = db.prepare(`
+      SELECT mc.id as cluster_id, mc.name, cm.id as member_id, cm.content
+      FROM memory_clusters mc
+      JOIN cluster_members cm ON cm.cluster_id = mc.id
+      GROUP BY mc.id
+      HAVING COUNT(cm.id) = 1
+    `).all();
+
+    if (remainingSingletons.length > 0) {
+      // Group remaining singletons by curated category
+      const categoryGroups = {}; // category name → [singleton]
+      for (const s of remainingSingletons) {
+        const category = matchCuratedCategory(s.content);
+        if (category) {
+          if (!categoryGroups[category]) categoryGroups[category] = [];
+          categoryGroups[category].push(s);
+        }
+      }
+
+      // Also check if any existing non-singleton cluster matches each category
+      const currentNonSingletons = db.prepare(`
+        SELECT mc.id, mc.name
+        FROM memory_clusters mc
+        JOIN cluster_members cm ON cm.cluster_id = mc.id
+        GROUP BY mc.id
+        HAVING COUNT(cm.id) > 1
+      `).all();
+
+      for (const [category, group] of Object.entries(categoryGroups)) {
+        if (group.length < 2) {
+          // Check if there's an existing non-singleton cluster for this category
+          let targetId = null;
+          for (const ns of currentNonSingletons) {
+            const members = db.prepare('SELECT content FROM cluster_members WHERE cluster_id = ?').all(ns.id);
+            const nsCategory = generateClusterNameFromMembers(members);
+            if (nsCategory === category) {
+              targetId = ns.id;
+              break;
+            }
+          }
+          if (!targetId) continue; // Only 1 singleton, no matching cluster — skip
+          // Merge single singleton into matching non-singleton cluster
+          const s = group[0];
+          console.log(`[Clusters] Category merge: "${s.name}" → existing "${category}" cluster`);
+          db.prepare('UPDATE cluster_members SET cluster_id = ? WHERE id = ?').run(targetId, s.member_id);
+          const embedding = await generateEmbedding(s.content);
+          if (embedding) {
+            const vectorArray = Array.from(embedding);
+            try {
+              await clusterTable.delete(`member_id = "${s.member_id}"`);
+              await clusterTable.add([{ id: randomUUID(), member_id: s.member_id, cluster_id: targetId, content: s.content, vector: vectorArray }]);
+            } catch (e) { console.error('[Clusters] LanceDB error:', e.message); }
+          }
+          db.prepare('DELETE FROM cluster_links WHERE cluster_a = ? OR cluster_b = ?').run(s.cluster_id, s.cluster_id);
+          db.prepare('DELETE FROM memory_clusters WHERE id = ?').run(s.cluster_id);
+          merged++;
+        } else {
+          // Merge multiple singletons sharing a category into the first one's cluster
+          const target = group[0];
+          console.log(`[Clusters] Category merge: grouping ${group.length} singletons into "${category}"`);
+          for (let i = 1; i < group.length; i++) {
+            const s = group[i];
+            db.prepare('UPDATE cluster_members SET cluster_id = ? WHERE id = ?').run(target.cluster_id, s.member_id);
+            const embedding = await generateEmbedding(s.content);
+            if (embedding) {
+              const vectorArray = Array.from(embedding);
+              try {
+                await clusterTable.delete(`member_id = "${s.member_id}"`);
+                await clusterTable.add([{ id: randomUUID(), member_id: s.member_id, cluster_id: target.cluster_id, content: s.content, vector: vectorArray }]);
+              } catch (e) { console.error('[Clusters] LanceDB error:', e.message); }
+            }
+            db.prepare('DELETE FROM cluster_links WHERE cluster_a = ? OR cluster_b = ?').run(s.cluster_id, s.cluster_id);
+            db.prepare('DELETE FROM memory_clusters WHERE id = ?').run(s.cluster_id);
+            merged++;
+          }
+        }
+      }
+    }
+
+    console.log(`[Clusters] Merged ${merged}/${singletons.length} singletons total`);
     return merged;
   } catch (error) {
     console.error('[Clusters] Error merging singletons:', error.message);
