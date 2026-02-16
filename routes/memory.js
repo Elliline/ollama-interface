@@ -277,4 +277,19 @@ router.delete('/fact/:id', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/memory/maintain
+ * Manually trigger a full maintenance cycle
+ */
+router.post('/maintain', async (req, res) => {
+  try {
+    const memoryManager = require('../db/memory-manager');
+    const result = await memoryManager.runMaintenance();
+    res.json(result);
+  } catch (error) {
+    console.error('[MemoryAPI] Error running maintenance:', error.message);
+    res.status(500).json({ error: 'Failed to run maintenance' });
+  }
+});
+
 module.exports = router;

@@ -20,6 +20,7 @@ const factExtractor = require('./db/fact-extractor');
 // Memory flush and clustering
 const memoryFlush = require('./db/memory-flush');
 const memoryClusters = require('./db/memory-clusters');
+const memoryManager = require('./db/memory-manager');
 
 // MCP tool calling
 const MCPClient = require('./mcp/mcp-client');
@@ -1713,7 +1714,9 @@ app.listen(PORT, () => {
   console.log('  - Memory clusters: Associative cluster-aware retrieval');
   console.log(`  - Memory files: data/memory/ (MEMORY.md, USER.md, daily/)`);
   console.log(`  - MCP tools: ${mcpClient.hasTools() ? mcpClient.getToolNames().join(', ') : 'None'}`);
+  console.log('  - Memory heartbeat: Every 2h (first run in 5min)');
   if (ALLOWED_OLLAMA_HOSTS.length > 0) {
     console.log(`  - Additional Ollama hosts: ${ALLOWED_OLLAMA_HOSTS.join(', ')}`);
   }
+  memoryManager.startHeartbeat();
 });

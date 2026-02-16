@@ -697,6 +697,7 @@ async function processFactExtraction(userMessage, assistantMessage, provider, mo
 
 module.exports = {
   extractFacts,
+  extractAllFactLines,
   appendToMemory,
   appendToDailyLog,
   loadMemoryContext,
