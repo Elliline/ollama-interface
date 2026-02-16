@@ -13,6 +13,9 @@ const rateLimit = require('express-rate-limit');
 // Database modules
 const db = require('./db/database');
 
+// Fact extraction and memory
+const factExtractor = require('./db/fact-extractor');
+
 // MCP tool calling
 const MCPClient = require('./mcp/mcp-client');
 
@@ -1088,48 +1091,78 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
     // Save user message to database
     const userMsgId = db.addMessage(convoId, 'user', userMessage.content, model);
 
-    // Generate embedding for the user message and search for relevant context
+    // === UPGRADE 1: Load durable memory files (MEMORY.md, USER.md, daily logs) ===
+    let memoryFiles = { memory: null, user: null, dailyToday: null, dailyYesterday: null };
+    try {
+      memoryFiles = db.loadMemoryFiles();
+      console.log('Memory files loaded:', {
+        memory: memoryFiles.memory ? `${memoryFiles.memory.length} chars` : 'none',
+        user: memoryFiles.user ? `${memoryFiles.user.length} chars` : 'none',
+        dailyToday: memoryFiles.dailyToday ? `${memoryFiles.dailyToday.length} chars` : 'none',
+        dailyYesterday: memoryFiles.dailyYesterday ? `${memoryFiles.dailyYesterday.length} chars` : 'none'
+      });
+    } catch (memFileError) {
+      console.error('Memory file load error:', memFileError.message);
+    }
+
+    // === UPGRADE 2: Hybrid search (vector + BM25) ===
     let memoryContext = [];
     try {
-      const embedding = await db.generateEmbedding(userMessage.content);
-      console.log('Embedding generated, length:', embedding.length);
-
-      const similarMessages = await db.searchSimilar(embedding, convoId, 5, 0.7);
-      console.log('Similar messages found:', similarMessages.length);
-      if (similarMessages.length > 0) {
-        similarMessages.forEach((msg, i) => {
-          console.log(`  Match ${i + 1}: "${msg.text.substring(0, 30)}..." (similarity: ${msg.similarity.toFixed(3)})`);
+      memoryContext = await db.hybridSearch(userMessage.content, convoId, 5, 0.6);
+      console.log('Hybrid search results:', memoryContext.length);
+      if (memoryContext.length > 0) {
+        memoryContext.forEach((msg, i) => {
+          console.log(`  Match ${i + 1}: "${msg.text.substring(0, 30)}..." (score: ${msg.similarity.toFixed(3)}, source: ${msg.source})`);
         });
       }
-      memoryContext = similarMessages;
 
       // Embed user message for future retrieval
+      const embedding = await db.generateEmbedding(userMessage.content);
       await db.addEmbedding(userMsgId, convoId, userMessage.content, 'user', embedding);
-    } catch (embeddingError) {
-      console.error('Memory retrieval error:', embeddingError.message);
-      console.error('Stack trace:', embeddingError.stack);
+    } catch (searchError) {
+      console.error('Memory retrieval error:', searchError.message);
       // Continue without memory - not a fatal error
     }
 
     // Build messages array with memory context injected
-    if (memoryContext.length > 0) {
-      console.log('Injecting memory context');
-    } else {
-      console.log('No memory context to inject');
-    }
     let enhancedMessages = [...messages];
 
-    // Add memory context as system message
+    // Build comprehensive memory system prompt
+    const memoryParts = [];
+
+    // Add durable memory (MEMORY.md + USER.md)
+    if (memoryFiles.memory) {
+      memoryParts.push(`=== Long-Term Memory ===\n${memoryFiles.memory}`);
+    }
+    if (memoryFiles.user) {
+      memoryParts.push(`=== User Profile ===\n${memoryFiles.user}`);
+    }
+
+    // Add daily logs for short-term continuity
+    if (memoryFiles.dailyYesterday) {
+      memoryParts.push(`=== Yesterday's Session Log ===\n${memoryFiles.dailyYesterday}`);
+    }
+    if (memoryFiles.dailyToday) {
+      memoryParts.push(`=== Today's Session Log ===\n${memoryFiles.dailyToday}`);
+    }
+
+    // Add hybrid search results from past conversations
     if (memoryContext.length > 0) {
       const contextText = memoryContext
         .map((m, i) => `[Memory ${i + 1}] ${m.role}: ${m.text.substring(0, 500)}${m.text.length > 500 ? '...' : ''}`)
         .join('\n');
+      memoryParts.push(`=== Relevant Past Conversations ===\n${contextText}`);
+    }
 
+    if (memoryParts.length > 0) {
+      console.log('Injecting memory context:', memoryParts.length, 'sections');
       const memorySystemMessage = {
         role: 'system',
-        content: `You have access to relevant context from previous conversations:\n\n${contextText}\n\nUse this context if it helps answer the current question, but don't explicitly mention that you're using memory unless asked.`
+        content: `You have access to the following memory and context:\n\n${memoryParts.join('\n\n')}\n\nUse this context if it helps answer the current question, but don't explicitly mention that you're using memory unless asked.`
       };
       enhancedMessages = [memorySystemMessage, ...enhancedMessages];
+    } else {
+      console.log('No memory context to inject');
     }
 
     // Auto-generate title from first user message if needed
@@ -1137,6 +1170,14 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
     if (!conversation.title && userMessage.content) {
       const title = userMessage.content.substring(0, 50) + (userMessage.content.length > 50 ? '...' : '');
       db.updateConversationTitle(convoId, title);
+    }
+
+    // Debug: print the memory system prompt being sent
+    const systemMsg = enhancedMessages.find(m => m.role === 'system');
+    if (systemMsg) {
+      console.log('=== Memory System Prompt (first 500 chars) ===');
+      console.log(systemMsg.content.substring(0, 500));
+      console.log(`=== (total length: ${systemMsg.content.length} chars) ===`);
     }
 
     // Route to appropriate provider
@@ -1430,8 +1471,17 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
     const contentType = (providerType === 'ollama' || providerType === 'squatchserve') ? 'application/x-ndjson' : 'text/event-stream';
     res.setHeader('Content-Type', contentType);
     res.setHeader('X-Conversation-Id', convoId);
-    res.setHeader('X-Has-Memory-Context', memoryContext.length > 0 ? 'true' : 'false');
+    res.setHeader('X-Has-Memory-Context', (memoryContext.length > 0 || memoryFiles.memory || memoryFiles.user) ? 'true' : 'false');
     res.setHeader('X-Tools-Used', toolsUsed ? 'true' : 'false');
+    // Count memory sources for the frontend
+    const memorySources = [
+      memoryFiles.memory ? 'long-term' : null,
+      memoryFiles.user ? 'user-profile' : null,
+      memoryFiles.dailyToday ? 'daily-today' : null,
+      memoryFiles.dailyYesterday ? 'daily-yesterday' : null,
+      memoryContext.length > 0 ? `${memoryContext.length}-conversations` : null
+    ].filter(Boolean);
+    res.setHeader('X-Memory-Sources', memorySources.join(',') || 'none');
 
     if (contentType === 'text/event-stream') {
       res.setHeader('Cache-Control', 'no-cache');
@@ -1528,6 +1578,24 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
       } catch (embeddingError) {
         console.warn('Failed to embed assistant response:', embeddingError.message);
       }
+
+      // === UPGRADE 1: Async fact extraction (non-blocking) ===
+      // Determine the correct host for local providers
+      const providerHost = providerType === 'llamacpp' ? (req.body.llamacppHost || LLAMACPP_HOST)
+        : providerType === 'squatchserve' ? (req.body.squatchserveHost || SQUATCHSERVE_HOST)
+        : (ollamaHost || OLLAMA_HOST);
+      const providerKey = apiKey || (providerType === 'claude' ? CLAUDE_API_KEY : providerType === 'grok' ? GROK_API_KEY : providerType === 'openai' ? OPENAI_API_KEY : '');
+
+      factExtractor.processFactExtraction(
+        userMessage.content,
+        fullResponse,
+        providerType,
+        model,
+        providerKey,
+        providerHost
+      ).catch(err => {
+        console.warn('[FactExtractor] Background extraction error:', err.message);
+      });
     }
 
   } catch (error) {
@@ -1573,7 +1641,10 @@ app.listen(PORT, () => {
   console.log(`  - STT (Whisper): ${STT_HOST}`);
   console.log('Conversation features:');
   console.log('  - Chat history: SQLite');
-  console.log('  - Semantic memory: LanceDB');
+  console.log('  - Semantic memory: LanceDB (vector) + SQLite FTS5 (BM25)');
+  console.log('  - Hybrid search: 0.6 vector + 0.4 BM25');
+  console.log('  - Fact extraction: Auto-extract after each exchange');
+  console.log(`  - Memory files: data/memory/ (MEMORY.md, USER.md, daily/)`);
   console.log(`  - MCP tools: ${mcpClient.hasTools() ? mcpClient.getToolNames().join(', ') : 'None'}`);
   if (ALLOWED_OLLAMA_HOSTS.length > 0) {
     console.log(`  - Additional Ollama hosts: ${ALLOWED_OLLAMA_HOSTS.join(', ')}`);

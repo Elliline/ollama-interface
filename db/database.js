@@ -79,7 +79,20 @@ function initDatabase() {
       ON conversations(updated_at DESC)
     `);
 
+    // Create FTS5 virtual table for full-text search
+    sqliteDb.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        content,
+        conversation_id UNINDEXED,
+        message_id UNINDEXED
+      )
+    `);
+
     console.log('SQLite database initialized successfully');
+
+    // Backfill FTS table with existing messages
+    backfillFTS();
+
     return sqliteDb;
   } catch (error) {
     console.error('Failed to initialize SQLite database:', error.message);
@@ -252,6 +265,17 @@ function addMessage(conversation_id, role, content, model = null) {
     `);
 
     stmt.run(id, conversation_id, role, content, model);
+
+    // Also insert into FTS5 table for full-text search
+    try {
+      const ftsStmt = sqliteDb.prepare(`
+        INSERT INTO messages_fts (content, conversation_id, message_id)
+        VALUES (?, ?, ?)
+      `);
+      ftsStmt.run(content, conversation_id, id);
+    } catch (ftsError) {
+      console.error('[FTS] Error adding message to FTS:', ftsError.message);
+    }
 
     // Update conversation's updated_at timestamp
     updateConversationTimestamp(conversation_id);
@@ -474,6 +498,325 @@ async function deleteConversationEmbeddings(conversation_id) {
   }
 }
 
+// ============ Full-Text Search (FTS5) Functions ============
+
+/**
+ * Backfill FTS table with existing messages
+ * Called during database initialization
+ */
+function backfillFTS() {
+  try {
+    if (!sqliteDb) {
+      console.error('[FTS] Cannot backfill: database not initialized');
+      return;
+    }
+
+    // Count rows in each table
+    const ftsCount = sqliteDb.prepare('SELECT COUNT(*) as count FROM messages_fts').get().count;
+    const messagesCount = sqliteDb.prepare('SELECT COUNT(*) as count FROM messages').get().count;
+
+    console.log(`[FTS] Current state: ${ftsCount} FTS rows, ${messagesCount} total messages`);
+
+    if (ftsCount >= messagesCount) {
+      console.log('[FTS] FTS table is up to date, no backfill needed');
+      return;
+    }
+
+    // Find messages not yet in FTS
+    const missingMessages = sqliteDb.prepare(`
+      SELECT m.id, m.conversation_id, m.content
+      FROM messages m
+      WHERE m.id NOT IN (SELECT message_id FROM messages_fts)
+    `).all();
+
+    if (missingMessages.length === 0) {
+      console.log('[FTS] No missing messages to backfill');
+      return;
+    }
+
+    console.log(`[FTS] Backfilling ${missingMessages.length} messages into FTS table`);
+
+    const insertStmt = sqliteDb.prepare(`
+      INSERT INTO messages_fts (content, conversation_id, message_id)
+      VALUES (?, ?, ?)
+    `);
+
+    const insertMany = sqliteDb.transaction((messages) => {
+      for (const msg of messages) {
+        insertStmt.run(msg.content, msg.conversation_id, msg.id);
+      }
+    });
+
+    insertMany(missingMessages);
+
+    console.log(`[FTS] Successfully backfilled ${missingMessages.length} messages`);
+  } catch (error) {
+    console.error('[FTS] Error during backfill:', error.message);
+    // Don't throw - backfill failure should not prevent app from starting
+  }
+}
+
+/**
+ * Sanitize FTS5 query to prevent MATCH syntax errors
+ * @param {string} query - Raw query string
+ * @returns {string} Sanitized query
+ */
+function sanitizeFTSQuery(query) {
+  if (!query || typeof query !== 'string') {
+    return '';
+  }
+
+  // Remove FTS5 special characters that can break MATCH
+  // Keep: letters, numbers, spaces, hyphens, underscores
+  // Remove: quotes, colons, asterisks, parentheses, etc.
+  let sanitized = query
+    .replace(/[^\w\s\-]/g, ' ') // Replace special chars with spaces
+    .replace(/\s+/g, ' ')        // Collapse multiple spaces
+    .trim();
+
+  // If query is empty after sanitization, return a safe default
+  if (!sanitized) {
+    return 'search'; // Fallback query that won't break FTS5
+  }
+
+  return sanitized;
+}
+
+/**
+ * Search messages using BM25 ranking (FTS5)
+ * @param {string} query - Search query
+ * @param {string} excludeConversationId - Conversation ID to exclude from results
+ * @param {number} limit - Maximum number of results
+ * @returns {Array} Array of search results with BM25 scores
+ */
+function searchBM25(query, excludeConversationId, limit = 10) {
+  try {
+    if (!sqliteDb) {
+      console.error('[BM25] Database not initialized');
+      return [];
+    }
+
+    const sanitized = sanitizeFTSQuery(query);
+    console.log(`[BM25] Searching for: "${sanitized}" (original: "${query}")`);
+
+    const stmt = sqliteDb.prepare(`
+      SELECT
+        message_id,
+        conversation_id,
+        content,
+        bm25(messages_fts) as score
+      FROM messages_fts
+      WHERE messages_fts MATCH ? AND conversation_id != ?
+      ORDER BY bm25(messages_fts)
+      LIMIT ?
+    `);
+
+    const results = stmt.all(sanitized, excludeConversationId, limit);
+    console.log(`[BM25] Found ${results.length} results`);
+
+    // BM25 scores are negative (more negative = better match)
+    // Normalize to 0-1 range
+    if (results.length === 0) {
+      return [];
+    }
+
+    // Find the best (most negative) score
+    const maxAbsScore = Math.max(...results.map(r => Math.abs(r.score)));
+
+    return results.map(result => ({
+      message_id: result.message_id,
+      conversation_id: result.conversation_id,
+      content: result.content,
+      score: maxAbsScore > 0 ? Math.abs(result.score) / maxAbsScore : 1.0
+    }));
+  } catch (error) {
+    console.error('[BM25] Search error:', error.message);
+    return [];
+  }
+}
+
+/**
+ * Hybrid search combining vector similarity and BM25 keyword search
+ * @param {string} query - Search query
+ * @param {string} excludeConversationId - Conversation ID to exclude from results
+ * @param {number} limit - Maximum number of results to return
+ * @param {number} threshold - Similarity threshold for vector search (0-1)
+ * @returns {Promise<Array>} Array of search results with combined scores
+ */
+async function hybridSearch(query, excludeConversationId, limit = 5, threshold = 0.6) {
+  try {
+    console.log(`[HybridSearch] Query: "${query}", limit: ${limit}, threshold: ${threshold}`);
+
+    // Step 1: Generate embedding for query
+    let vectorResults = [];
+    try {
+      const embedding = await generateEmbedding(query);
+      console.log('[HybridSearch] Generated query embedding');
+
+      // Step 2: Run vector search
+      vectorResults = await searchSimilar(embedding, excludeConversationId, limit * 2, threshold);
+      console.log(`[HybridSearch] Vector search found ${vectorResults.length} results`);
+    } catch (embeddingError) {
+      console.error('[HybridSearch] Vector search failed:', embeddingError.message);
+      // Continue with BM25 only
+    }
+
+    // Step 3: Run BM25 search
+    const bm25Results = searchBM25(query, excludeConversationId, limit * 2);
+    console.log(`[HybridSearch] BM25 search found ${bm25Results.length} results`);
+
+    // Step 4: Fuse results by message_id
+    const resultsMap = new Map();
+
+    // Add vector results
+    for (const result of vectorResults) {
+      resultsMap.set(result.message_id || result.text, {
+        text: result.text,
+        role: result.role,
+        conversation_id: result.conversation_id,
+        message_id: result.message_id,
+        vectorScore: result.similarity,
+        bm25Score: 0
+      });
+    }
+
+    // Merge BM25 results
+    for (const result of bm25Results) {
+      const key = result.message_id || result.content;
+      if (resultsMap.has(key)) {
+        // Result appears in both searches
+        resultsMap.get(key).bm25Score = result.score;
+      } else {
+        // BM25-only result - get full message details from SQLite
+        try {
+          const msgStmt = sqliteDb.prepare(`
+            SELECT id, conversation_id, role, content
+            FROM messages
+            WHERE id = ?
+          `);
+          const msg = msgStmt.get(result.message_id);
+
+          if (msg) {
+            resultsMap.set(key, {
+              text: msg.content,
+              role: msg.role,
+              conversation_id: msg.conversation_id,
+              message_id: msg.id,
+              vectorScore: 0,
+              bm25Score: result.score
+            });
+          }
+        } catch (dbError) {
+          console.error('[HybridSearch] Error fetching message details:', dbError.message);
+        }
+      }
+    }
+
+    // Step 5: Calculate combined scores and sort
+    const weightVector = 0.6;
+    const weightBM25 = 0.4;
+
+    const combinedResults = Array.from(resultsMap.values()).map(result => {
+      const finalScore = (weightVector * result.vectorScore) + (weightBM25 * result.bm25Score);
+
+      // Determine source
+      let source = 'hybrid';
+      if (result.vectorScore > 0 && result.bm25Score === 0) {
+        source = 'vector';
+      } else if (result.bm25Score > 0 && result.vectorScore === 0) {
+        source = 'bm25';
+      }
+
+      return {
+        text: result.text,
+        role: result.role,
+        conversation_id: result.conversation_id,
+        similarity: finalScore,
+        source,
+        // Include component scores for debugging
+        _vectorScore: result.vectorScore,
+        _bm25Score: result.bm25Score
+      };
+    });
+
+    // Sort by combined score descending
+    combinedResults.sort((a, b) => b.similarity - a.similarity);
+
+    // Return top N results
+    const topResults = combinedResults.slice(0, limit);
+    console.log(`[HybridSearch] Returning ${topResults.length} results (${topResults.filter(r => r.source === 'hybrid').length} hybrid, ${topResults.filter(r => r.source === 'vector').length} vector-only, ${topResults.filter(r => r.source === 'bm25').length} bm25-only)`);
+
+    return topResults;
+  } catch (error) {
+    console.error('[HybridSearch] Error:', error.message);
+    return [];
+  }
+}
+
+// ============ Memory Files Functions ============
+
+/**
+ * Load memory files for system prompt injection
+ * @param {string} memoryDir - Directory containing memory files
+ * @returns {Object} Object containing memory file contents
+ */
+function loadMemoryFiles(memoryDir = path.join(__dirname, '../data/memory')) {
+  try {
+    console.log(`[MemoryFiles] Loading from: ${memoryDir}`);
+
+    const result = {
+      memory: null,
+      user: null,
+      dailyToday: null,
+      dailyYesterday: null
+    };
+
+    // Helper to safely read a file
+    const readFileSafe = (filePath, label) => {
+      try {
+        if (fs.existsSync(filePath)) {
+          const content = fs.readFileSync(filePath, 'utf-8');
+          console.log(`[MemoryFiles] Loaded ${label}: ${content.length} chars`);
+          return content;
+        } else {
+          console.log(`[MemoryFiles] ${label} not found: ${filePath}`);
+          return null;
+        }
+      } catch (error) {
+        console.error(`[MemoryFiles] Error reading ${label}:`, error.message);
+        return null;
+      }
+    };
+
+    // Load MEMORY.md
+    result.memory = readFileSafe(path.join(memoryDir, 'MEMORY.md'), 'MEMORY.md');
+
+    // Load USER.md
+    result.user = readFileSafe(path.join(memoryDir, 'USER.md'), 'USER.md');
+
+    // Load today's daily note
+    const today = new Date();
+    const todayFilename = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.md`;
+    result.dailyToday = readFileSafe(path.join(memoryDir, 'daily', todayFilename), `daily/${todayFilename}`);
+
+    // Load yesterday's daily note
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayFilename = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}.md`;
+    result.dailyYesterday = readFileSafe(path.join(memoryDir, 'daily', yesterdayFilename), `daily/${yesterdayFilename}`);
+
+    return result;
+  } catch (error) {
+    console.error('[MemoryFiles] Error loading memory files:', error.message);
+    return {
+      memory: null,
+      user: null,
+      dailyToday: null,
+      dailyYesterday: null
+    };
+  }
+}
+
 // ============ Exports ============
 
 module.exports = {
@@ -494,5 +837,13 @@ module.exports = {
   generateEmbedding,
   addEmbedding,
   searchSimilar,
-  deleteConversationEmbeddings
+  deleteConversationEmbeddings,
+
+  // Full-text search functions
+  searchBM25,
+  hybridSearch,
+  backfillFTS,
+
+  // Memory files
+  loadMemoryFiles
 };
