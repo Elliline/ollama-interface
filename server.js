@@ -25,6 +25,7 @@ const MCPClient = require('./mcp/mcp-client');
 
 // Routes
 const conversationsRouter = require('./routes/conversations');
+const memoryRouter = require('./routes/memory');
 
 const app = express();
 
@@ -97,6 +98,9 @@ app.use('/api/', apiLimiter);
 
 // Mount conversation routes
 app.use('/api/conversations', conversationsRouter);
+
+// Mount memory routes
+app.use('/api/memory', memoryRouter);
 
 // ============ Security Validation Functions ============
 

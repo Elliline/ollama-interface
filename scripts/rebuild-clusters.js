@@ -53,7 +53,17 @@ async function main() {
     console.log(`  → Cluster: ${result.clusterName} (new: ${result.isNew})`);
   }
 
-  // 5. Print summary
+  // 5. Merge singletons into larger clusters
+  console.log('\n=== Merging Singleton Clusters ===');
+  const mergedCount = await memoryClusters.mergeSingletons();
+  console.log(`Merged ${mergedCount} singletons`);
+
+  // 6. Rename all clusters using word frequency analysis
+  console.log('\n=== Renaming Clusters ===');
+  const renamedCount = await memoryClusters.renameAllClusters();
+  console.log(`Renamed ${renamedCount} clusters`);
+
+  // 7. Print summary
   console.log('\n=== Cluster Summary ===');
   const clusters = memoryClusters.getClusters();
   for (const cluster of clusters) {

@@ -1,6 +1,24 @@
 const { randomUUID } = require('crypto');
 const { getSqliteDb, getClusterEmbeddingsTable } = require('./database');
 
+// Stop words filtered out during cluster naming
+const STOP_WORDS = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+  'should', 'may', 'might', 'shall', 'can', 'need', 'dare', 'ought',
+  'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from',
+  'as', 'into', 'through', 'during', 'before', 'after', 'above', 'below',
+  'between', 'out', 'off', 'over', 'under', 'again', 'further', 'then',
+  'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each',
+  'every', 'both', 'few', 'more', 'most', 'other', 'some', 'such', 'no',
+  'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
+  'just', 'because', 'but', 'and', 'or', 'if', 'while', 'that', 'this',
+  'these', 'those', 'what', 'which', 'who', 'whom', 'its', 'his', 'her',
+  'their', 'our', 'my', 'your', 'about', 'also', 'like', 'likes',
+  'user', 'uses', 'using', 'runs', 'running', 'has', 'have', 'had',
+  'loves', 'prefers', 'wants', 'enjoys', 'includes', 'named', 'called'
+]);
+
 /**
  * Generate embedding for text using Ollama's nomic-embed-text model
  * @param {string} text - Text to embed
@@ -133,17 +151,118 @@ async function generateClusterName(fact, provider, model, apiKey, host) {
 
 /**
  * Extract a simple name from fact text (fallback)
+ * Strips common prefixes, removes stop words, returns Title Case top words
  * @param {string} fact - The fact text
  * @returns {string} - Extracted name
  */
 function extractNameFromFact(fact) {
-  // Remove common prefixes and take first few significant words
+  // Strip common fact prefixes
   const cleaned = fact
-    .replace(/^(The user|User|I|My|This|That|There)\s+/i, '')
-    .replace(/[.,!?;:].*$/, ''); // Remove from first punctuation
+    .replace(/^(the\s+)?user('s)?\s+(has|is|loves|runs|uses|prefers|wants|enjoys|works|lives|owns|plays|likes)\s+/i, '')
+    .replace(/^(the\s+)?user('s)?\s+/i, '')
+    .replace(/^(I|My|This|That|There|The)\s+/i, '')
+    .replace(/[.,!?;:].*$/, ''); // Trim from first punctuation
 
-  const words = cleaned.split(/\s+/).filter(w => w.length > 2);
-  return words.slice(0, 3).join(' ').substring(0, 50) || 'General';
+  // Split into words, filter stop words and short words
+  const words = cleaned.split(/\s+/)
+    .map(w => w.replace(/[^a-zA-Z0-9-]/g, ''))
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w.toLowerCase()));
+
+  if (words.length === 0) return 'General';
+
+  // Title case top 2-3 significant words
+  const titleCase = w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+  return words.slice(0, 3).map(titleCase).join(' ').substring(0, 50);
+}
+
+/**
+ * Generate a cluster name from all its members using word frequency analysis
+ * @param {Array} members - Array of {content} objects
+ * @returns {string} - Generated cluster name (2-3 words, Title Case)
+ */
+function generateClusterNameFromMembers(members) {
+  if (!members || members.length === 0) return 'General';
+
+  // Concatenate all member content
+  const allText = members.map(m => m.content || m).join(' ');
+
+  // Domain-specific boosters - words that are more meaningful for cluster names
+  const boosters = new Set([
+    'server', 'game', 'gaming', 'pet', 'pets', 'dog', 'dogs', 'cat', 'cats',
+    'music', 'song', 'band', 'guitar', 'piano', 'linux', 'windows', 'mac',
+    'python', 'javascript', 'code', 'coding', 'programming', 'ai', 'model',
+    'network', 'docker', 'kubernetes', 'database', 'sql', 'api',
+    'family', 'wife', 'husband', 'kids', 'children', 'brother', 'sister',
+    'work', 'job', 'company', 'project', 'business', 'client', 'msp',
+    'gpu', 'cpu', 'ram', 'vram', 'nvidia', 'amd', 'intel',
+    'ollama', 'llama', 'battletech', 'constantinople', 'story', 'fiction',
+    'writing', 'book', 'novel', 'homebrew', 'beer', 'cooking', 'food',
+    'car', 'truck', 'vehicle', 'house', 'home', 'apartment',
+    'hardware', 'software', 'migration', 'deployment', 'infrastructure'
+  ]);
+
+  // Word frequency analysis
+  const freq = {};
+  const words = allText.split(/\s+/)
+    .map(w => w.replace(/[^a-zA-Z0-9-]/g, '').toLowerCase())
+    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
+
+  for (const word of words) {
+    freq[word] = (freq[word] || 0) + 1;
+  }
+
+  // Score each word: frequency + domain boost
+  const scored = Object.entries(freq).map(([word, count]) => ({
+    word,
+    score: count + (boosters.has(word) ? 3 : 0)
+  }));
+
+  // Sort by score descending
+  scored.sort((a, b) => b.score - a.score);
+
+  if (scored.length === 0) return 'General';
+
+  // Take top 2-3 unique words
+  const titleCase = w => w.charAt(0).toUpperCase() + w.slice(1);
+  const topWords = scored.slice(0, 3).map(s => titleCase(s.word));
+
+  return topWords.join(' ').substring(0, 50);
+}
+
+/**
+ * Rename all clusters using word frequency analysis of their members
+ * @returns {Promise<number>} - Number of clusters renamed
+ */
+async function renameAllClusters() {
+  try {
+    const db = getSqliteDb();
+    if (!db) return 0;
+
+    const clusters = db.prepare('SELECT id, name FROM memory_clusters').all();
+    let renamed = 0;
+
+    for (const cluster of clusters) {
+      const members = db.prepare(
+        'SELECT content FROM cluster_members WHERE cluster_id = ?'
+      ).all(cluster.id);
+
+      if (members.length === 0) continue;
+
+      const newName = generateClusterNameFromMembers(members);
+      if (newName && newName !== cluster.name) {
+        db.prepare('UPDATE memory_clusters SET name = ? WHERE id = ?')
+          .run(newName, cluster.id);
+        console.log(`[Clusters] Renamed "${cluster.name}" → "${newName}"`);
+        renamed++;
+      }
+    }
+
+    console.log(`[Clusters] Renamed ${renamed}/${clusters.length} clusters`);
+    return renamed;
+  } catch (error) {
+    console.error('[Clusters] Error renaming clusters:', error.message);
+    return 0;
+  }
 }
 
 /**
@@ -549,11 +668,137 @@ function getCluster(id) {
   }
 }
 
+/**
+ * Merge singleton clusters into the most similar non-singleton cluster
+ * @param {number} threshold - Minimum similarity to merge (default 0.45)
+ * @returns {Promise<number>} - Number of singletons merged
+ */
+async function mergeSingletons(threshold = 0.45) {
+  try {
+    const db = getSqliteDb();
+    if (!db) return 0;
+
+    // Find singleton clusters (clusters with exactly 1 member)
+    const singletons = db.prepare(`
+      SELECT mc.id as cluster_id, mc.name, cm.id as member_id, cm.content
+      FROM memory_clusters mc
+      JOIN cluster_members cm ON cm.cluster_id = mc.id
+      GROUP BY mc.id
+      HAVING COUNT(cm.id) = 1
+    `).all();
+
+    if (singletons.length === 0) {
+      console.log('[Clusters] No singleton clusters to merge');
+      return 0;
+    }
+
+    // Find non-singleton cluster IDs
+    const nonSingletons = db.prepare(`
+      SELECT mc.id
+      FROM memory_clusters mc
+      JOIN cluster_members cm ON cm.cluster_id = mc.id
+      GROUP BY mc.id
+      HAVING COUNT(cm.id) > 1
+    `).all().map(r => r.id);
+
+    if (nonSingletons.length === 0) {
+      console.log('[Clusters] No non-singleton clusters to merge into');
+      return 0;
+    }
+
+    const nonSingletonSet = new Set(nonSingletons);
+    const clusterTable = await getClusterEmbeddingsTable();
+    if (!clusterTable) {
+      console.log('[Clusters] Cluster embeddings table not available');
+      return 0;
+    }
+
+    let merged = 0;
+
+    for (const singleton of singletons) {
+      // Generate embedding for singleton content
+      const embedding = await generateEmbedding(singleton.content);
+      if (!embedding) continue;
+
+      // Search for similar content in cluster_embeddings
+      const vectorArray = Array.from(embedding);
+      const results = await clusterTable
+        .search(vectorArray)
+        .metricType('cosine')
+        .limit(20)
+        .execute();
+
+      // Find best non-singleton match
+      let bestClusterId = null;
+      let bestSimilarity = 0;
+
+      for (const result of results) {
+        if (result.cluster_id === singleton.cluster_id) continue;
+        if (!nonSingletonSet.has(result.cluster_id)) continue;
+
+        const similarity = 1 - (result._distance || 0);
+        if (similarity > bestSimilarity) {
+          bestSimilarity = similarity;
+          bestClusterId = result.cluster_id;
+        }
+      }
+
+      if (!bestClusterId || bestSimilarity < threshold) {
+        continue;
+      }
+
+      const targetCluster = db.prepare('SELECT name FROM memory_clusters WHERE id = ?')
+        .get(bestClusterId);
+
+      console.log(`[Clusters] Merging singleton "${singleton.name}" → "${targetCluster?.name}" (similarity: ${bestSimilarity.toFixed(3)})`);
+
+      // Move member to target cluster
+      db.prepare('UPDATE cluster_members SET cluster_id = ? WHERE id = ?')
+        .run(bestClusterId, singleton.member_id);
+
+      // Update LanceDB: delete old entry, add with new cluster_id
+      try {
+        await clusterTable.delete(`member_id = "${singleton.member_id}"`);
+        await clusterTable.add([{
+          id: randomUUID(),
+          member_id: singleton.member_id,
+          cluster_id: bestClusterId,
+          content: singleton.content,
+          vector: vectorArray
+        }]);
+      } catch (lanceErr) {
+        console.error('[Clusters] LanceDB update error during merge:', lanceErr.message);
+      }
+
+      // Delete empty cluster and its links
+      db.prepare('DELETE FROM cluster_links WHERE cluster_a = ? OR cluster_b = ?')
+        .run(singleton.cluster_id, singleton.cluster_id);
+      db.prepare('DELETE FROM memory_clusters WHERE id = ?')
+        .run(singleton.cluster_id);
+
+      // Update target cluster timestamp
+      db.prepare('UPDATE memory_clusters SET updated_at = ? WHERE id = ?')
+        .run(new Date().toISOString(), bestClusterId);
+
+      merged++;
+    }
+
+    console.log(`[Clusters] Merged ${merged}/${singletons.length} singletons`);
+    return merged;
+  } catch (error) {
+    console.error('[Clusters] Error merging singletons:', error.message);
+    return 0;
+  }
+}
+
 module.exports = {
   assignToCluster,
   searchClusters,
   getClusters,
   getCluster,
   generateEmbedding,
-  cosineSimilarity
+  cosineSimilarity,
+  generateClusterNameFromMembers,
+  renameAllClusters,
+  mergeSingletons
 };

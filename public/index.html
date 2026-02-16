@@ -36,6 +36,7 @@
           <option value="">Select a model</option>
         </select>
         <button id="settingsBtn" class="settings-btn" title="Settings">⚙️</button>
+        <button id="memoryBtn" class="memory-panel-btn" title="Memory">&#x1F9E0;</button>
         <button id="newChatBtn" class="new-chat-btn">New Chat</button>
       </div>
       <!-- SquatchServe Model Status -->
@@ -62,6 +63,53 @@
       <button id="sendBtn" class="send-btn">Send</button>
     </div>
   </div>
+
+  <!-- Memory Panel (right side slide-out) -->
+  <div id="memoryPanel" class="memory-panel">
+    <div class="memory-panel-header">
+      <h2>Memory</h2>
+      <button id="memoryPanelClose" class="close-btn">&times;</button>
+    </div>
+    <div class="memory-panel-tabs">
+      <button class="memory-tab active" data-tab="facts">Facts</button>
+      <button class="memory-tab" data-tab="clusters">Clusters</button>
+      <button class="memory-tab" data-tab="daily">Daily</button>
+      <button class="memory-tab" data-tab="search">Search</button>
+    </div>
+    <div class="memory-panel-content">
+      <!-- Facts Tab -->
+      <div id="memoryTabFacts" class="memory-tab-content active">
+        <div class="memory-add-fact">
+          <input type="text" id="memoryAddFactInput" placeholder="Add a fact..." />
+          <button id="memoryAddFactBtn">+</button>
+        </div>
+        <div id="memoryFactsList" class="memory-facts-list">
+          <div class="memory-loading">Loading facts...</div>
+        </div>
+      </div>
+      <!-- Clusters Tab -->
+      <div id="memoryTabClusters" class="memory-tab-content">
+        <div id="memoryClustersList" class="memory-clusters-list">
+          <div class="memory-loading">Loading clusters...</div>
+        </div>
+      </div>
+      <!-- Daily Tab -->
+      <div id="memoryTabDaily" class="memory-tab-content">
+        <div id="memoryDailyContent" class="memory-daily-content">
+          <div class="memory-loading">Loading daily logs...</div>
+        </div>
+      </div>
+      <!-- Search Tab -->
+      <div id="memoryTabSearch" class="memory-tab-content">
+        <div class="memory-search-bar">
+          <input type="text" id="memorySearchInput" placeholder="Search memory..." />
+          <button id="memorySearchBtn">Search</button>
+        </div>
+        <div id="memorySearchResults" class="memory-search-results"></div>
+      </div>
+    </div>
+  </div>
+  <div id="memoryPanelOverlay" class="memory-panel-overlay"></div>
 
   <!-- Settings Modal -->
   <div id="settingsModal" class="modal" style="display: none;">

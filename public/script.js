@@ -403,7 +403,7 @@ async function sendMessage() {
 
     // Show memory context indicator if applicable
     if (hasMemoryContext) {
-      showMemoryIndicator();
+      showMemoryIndicator(response);
     }
 
     // Show tools indicator if applicable
@@ -477,17 +477,40 @@ async function sendMessage() {
   }
 }
 
-// Show memory context indicator
-function showMemoryIndicator() {
+// Show memory context indicator (persistent, clickable, with source breakdown)
+function showMemoryIndicator(response) {
   const indicator = document.createElement('div');
-  indicator.className = 'memory-context-indicator';
-  indicator.textContent = 'Using context from previous conversations';
-  messagesContainer.appendChild(indicator);
+  indicator.className = 'memory-indicator-persistent';
 
-  // Remove after a few seconds
-  setTimeout(() => {
-    indicator.remove();
-  }, 5000);
+  // Parse memory sources from response headers
+  let sourcesText = '';
+  if (response && response.headers) {
+    const sources = response.headers.get('X-Memory-Sources') || 'none';
+    if (sources !== 'none') {
+      const parts = sources.split(',');
+      const labels = parts.map(s => {
+        if (s === 'long-term') return 'Long-term memory';
+        if (s === 'user-profile') return 'User profile';
+        if (s === 'daily-today') return "Today's log";
+        if (s === 'daily-yesterday') return "Yesterday's log";
+        if (s.endsWith('-conversations')) return `${s.split('-')[0]} past conversations`;
+        if (s.endsWith('-clusters')) return `${s.split('-')[0]} memory clusters`;
+        return s;
+      });
+      sourcesText = labels.join(', ');
+    }
+  }
+
+  indicator.innerHTML = `
+    <span>Using memory context</span>
+    <div class="memory-indicator-details">${sourcesText ? escapeHtml(sourcesText) : 'Memory files loaded'}</div>
+  `;
+
+  indicator.addEventListener('click', () => {
+    indicator.classList.toggle('expanded');
+  });
+
+  messagesContainer.appendChild(indicator);
 }
 
 // Show tools usage indicator
@@ -1572,5 +1595,384 @@ function updateModelStatusBarVisibility() {
     modelStatusBar.style.display = 'none';
     stopSquatchserveStatusPolling();
     loadedSquatchserveModel = null;
+  }
+}
+
+// ============ Memory Panel Functions ============
+
+const memoryBtn = document.getElementById('memoryBtn');
+const memoryPanel = document.getElementById('memoryPanel');
+const memoryPanelClose = document.getElementById('memoryPanelClose');
+const memoryPanelOverlay = document.getElementById('memoryPanelOverlay');
+const memoryAddFactInput = document.getElementById('memoryAddFactInput');
+const memoryAddFactBtn = document.getElementById('memoryAddFactBtn');
+const memorySearchInput = document.getElementById('memorySearchInput');
+const memorySearchBtn = document.getElementById('memorySearchBtn');
+
+// Cache for loaded cluster member IDs (for edit/delete)
+let memoryFactsCache = [];
+
+// Set up memory panel listeners
+if (memoryBtn) {
+  memoryBtn.addEventListener('click', openMemoryPanel);
+}
+if (memoryPanelClose) {
+  memoryPanelClose.addEventListener('click', closeMemoryPanel);
+}
+if (memoryPanelOverlay) {
+  memoryPanelOverlay.addEventListener('click', closeMemoryPanel);
+}
+if (memoryAddFactBtn) {
+  memoryAddFactBtn.addEventListener('click', addManualFact);
+}
+if (memoryAddFactInput) {
+  memoryAddFactInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') addManualFact();
+  });
+}
+if (memorySearchBtn) {
+  memorySearchBtn.addEventListener('click', searchMemory);
+}
+if (memorySearchInput) {
+  memorySearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') searchMemory();
+  });
+}
+
+// Tab switching
+document.querySelectorAll('.memory-tab').forEach(tab => {
+  tab.addEventListener('click', () => switchMemoryTab(tab.dataset.tab));
+});
+
+function openMemoryPanel() {
+  memoryPanel?.classList.add('open');
+  memoryPanelOverlay?.classList.add('active');
+  // Load the active tab data
+  const activeTab = document.querySelector('.memory-tab.active');
+  if (activeTab) {
+    switchMemoryTab(activeTab.dataset.tab);
+  } else {
+    switchMemoryTab('facts');
+  }
+}
+
+function closeMemoryPanel() {
+  memoryPanel?.classList.remove('open');
+  memoryPanelOverlay?.classList.remove('active');
+}
+
+function switchMemoryTab(name) {
+  // Update tab buttons
+  document.querySelectorAll('.memory-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.memory-tab[data-tab="${name}"]`)?.classList.add('active');
+
+  // Update tab content
+  document.querySelectorAll('.memory-tab-content').forEach(c => c.classList.remove('active'));
+  const tabContent = document.getElementById(`memoryTab${name.charAt(0).toUpperCase() + name.slice(1)}`);
+  tabContent?.classList.add('active');
+
+  // Load data for the tab
+  if (name === 'facts') loadFactsTab();
+  else if (name === 'clusters') loadClustersTab();
+  else if (name === 'daily') loadDailyTab();
+}
+
+// ---- Facts Tab ----
+async function loadFactsTab() {
+  const container = document.getElementById('memoryFactsList');
+  if (!container) return;
+  container.innerHTML = '<div class="memory-loading">Loading facts...</div>';
+
+  try {
+    // Load cluster members (facts with IDs for edit/delete)
+    const clustersRes = await fetch('/api/memory/clusters');
+    const clustersData = await clustersRes.json();
+    const clusters = clustersData.clusters || [];
+
+    // Load all members from all clusters
+    memoryFactsCache = [];
+    for (const cluster of clusters) {
+      const clusterRes = await fetch(`/api/memory/clusters/${cluster.id}`);
+      const clusterData = await clusterRes.json();
+      if (clusterData.members) {
+        for (const member of clusterData.members) {
+          memoryFactsCache.push({
+            id: member.id,
+            content: member.content,
+            clusterName: cluster.name,
+            clusterId: cluster.id
+          });
+        }
+      }
+    }
+
+    if (memoryFactsCache.length === 0) {
+      container.innerHTML = '<div class="memory-empty">No facts stored yet. Add one above!</div>';
+      return;
+    }
+
+    container.innerHTML = memoryFactsCache.map(fact => `
+      <div class="memory-fact-item" data-id="${fact.id}">
+        <div class="memory-fact-content">${escapeHtml(fact.content)}</div>
+        <div class="memory-fact-actions">
+          <button class="memory-fact-action-btn edit" data-id="${fact.id}" title="Edit">&#9998;</button>
+          <button class="memory-fact-action-btn delete" data-id="${fact.id}" title="Delete">&#128465;</button>
+        </div>
+      </div>
+    `).join('');
+
+    // Attach edit/delete handlers
+    container.querySelectorAll('.memory-fact-action-btn.edit').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        editFact(btn.dataset.id);
+      });
+    });
+    container.querySelectorAll('.memory-fact-action-btn.delete').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteFact(btn.dataset.id);
+      });
+    });
+  } catch (error) {
+    console.error('[MemoryPanel] Error loading facts:', error);
+    container.innerHTML = '<div class="memory-empty">Failed to load facts</div>';
+  }
+}
+
+// ---- Clusters Tab ----
+async function loadClustersTab() {
+  const container = document.getElementById('memoryClustersList');
+  if (!container) return;
+  container.innerHTML = '<div class="memory-loading">Loading clusters...</div>';
+
+  try {
+    const res = await fetch('/api/memory/clusters');
+    const data = await res.json();
+    const clusters = data.clusters || [];
+
+    if (clusters.length === 0) {
+      container.innerHTML = '<div class="memory-empty">No clusters yet</div>';
+      return;
+    }
+
+    container.innerHTML = clusters.map(c => `
+      <div class="memory-cluster-item" data-id="${c.id}">
+        <div class="memory-cluster-header">
+          <span class="memory-cluster-name">${escapeHtml(c.name)}</span>
+          <span class="memory-cluster-count">${c.member_count}</span>
+        </div>
+        <div class="memory-cluster-members" id="cluster-members-${c.id}"></div>
+      </div>
+    `).join('');
+
+    // Attach expand handlers
+    container.querySelectorAll('.memory-cluster-header').forEach(header => {
+      header.addEventListener('click', () => {
+        const item = header.closest('.memory-cluster-item');
+        toggleClusterExpand(item.dataset.id);
+      });
+    });
+  } catch (error) {
+    console.error('[MemoryPanel] Error loading clusters:', error);
+    container.innerHTML = '<div class="memory-empty">Failed to load clusters</div>';
+  }
+}
+
+async function toggleClusterExpand(clusterId) {
+  const membersEl = document.getElementById(`cluster-members-${clusterId}`);
+  if (!membersEl) return;
+
+  if (membersEl.classList.contains('expanded')) {
+    membersEl.classList.remove('expanded');
+    return;
+  }
+
+  // Load cluster details
+  try {
+    const res = await fetch(`/api/memory/clusters/${clusterId}`);
+    const data = await res.json();
+
+    let html = '';
+    if (data.members) {
+      html += data.members.map(m =>
+        `<div class="memory-cluster-member">${escapeHtml(m.content)}</div>`
+      ).join('');
+    }
+
+    if (data.linkedClusters && data.linkedClusters.length > 0) {
+      html += '<div class="memory-cluster-linked">';
+      html += '<div class="memory-cluster-linked-title">Linked clusters:</div>';
+      html += data.linkedClusters.map(lc =>
+        `<div class="memory-cluster-member">${escapeHtml(lc.name)} (strength: ${lc.strength.toFixed(2)})</div>`
+      ).join('');
+      html += '</div>';
+    }
+
+    membersEl.innerHTML = html;
+    membersEl.classList.add('expanded');
+  } catch (error) {
+    console.error('[MemoryPanel] Error loading cluster details:', error);
+  }
+}
+
+// ---- Daily Tab ----
+async function loadDailyTab() {
+  const container = document.getElementById('memoryDailyContent');
+  if (!container) return;
+  container.innerHTML = '<div class="memory-loading">Loading daily logs...</div>';
+
+  try {
+    const res = await fetch('/api/memory');
+    const data = await res.json();
+
+    let html = '';
+
+    if (data.dailyToday) {
+      html += '<div class="memory-daily-section"><h3>Today</h3>';
+      html += `<div class="memory-daily-entry">${escapeHtml(data.dailyToday).replace(/\n/g, '<br>')}</div>`;
+      html += '</div>';
+    }
+
+    if (data.dailyYesterday) {
+      html += '<div class="memory-daily-section"><h3>Yesterday</h3>';
+      html += `<div class="memory-daily-entry">${escapeHtml(data.dailyYesterday).replace(/\n/g, '<br>')}</div>`;
+      html += '</div>';
+    }
+
+    if (!html) {
+      html = '<div class="memory-empty">No daily logs found</div>';
+    }
+
+    container.innerHTML = html;
+  } catch (error) {
+    console.error('[MemoryPanel] Error loading daily logs:', error);
+    container.innerHTML = '<div class="memory-empty">Failed to load daily logs</div>';
+  }
+}
+
+// ---- Search Tab ----
+async function searchMemory() {
+  const query = memorySearchInput?.value.trim();
+  if (!query) return;
+
+  const resultsContainer = document.getElementById('memorySearchResults');
+  if (!resultsContainer) return;
+  resultsContainer.innerHTML = '<div class="memory-loading">Searching...</div>';
+
+  try {
+    const res = await fetch('/api/memory/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, limit: 15 })
+    });
+
+    const data = await res.json();
+    const results = data.results || [];
+
+    if (results.length === 0) {
+      resultsContainer.innerHTML = '<div class="memory-empty">No results found</div>';
+      return;
+    }
+
+    resultsContainer.innerHTML = results.map(r => `
+      <div class="memory-search-result">
+        <div>${escapeHtml(r.text?.substring(0, 300) || '')}${(r.text?.length || 0) > 300 ? '...' : ''}</div>
+        <div class="memory-search-result-score">
+          Score: ${(r.similarity || 0).toFixed(3)}
+          <span class="memory-search-result-source ${r.source || ''}">${r.source || 'unknown'}</span>
+        </div>
+      </div>
+    `).join('');
+  } catch (error) {
+    console.error('[MemoryPanel] Error searching:', error);
+    resultsContainer.innerHTML = '<div class="memory-empty">Search failed</div>';
+  }
+}
+
+// ---- Add Fact ----
+async function addManualFact() {
+  const input = memoryAddFactInput;
+  if (!input) return;
+  const fact = input.value.trim();
+  if (!fact) return;
+
+  input.value = '';
+  input.disabled = true;
+
+  try {
+    const res = await fetch('/api/memory/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fact })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to add fact');
+    }
+
+    const data = await res.json();
+    console.log('[MemoryPanel] Fact added:', data);
+
+    // Refresh facts tab
+    loadFactsTab();
+  } catch (error) {
+    console.error('[MemoryPanel] Error adding fact:', error);
+    alert('Failed to add fact: ' + error.message);
+  } finally {
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+// ---- Edit Fact ----
+async function editFact(memberId) {
+  const fact = memoryFactsCache.find(f => f.id === memberId);
+  if (!fact) return;
+
+  const newContent = prompt('Edit fact:', fact.content);
+  if (!newContent || newContent.trim() === fact.content) return;
+
+  try {
+    const res = await fetch('/api/memory/edit', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ memberId, content: newContent.trim() })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to edit fact');
+    }
+
+    loadFactsTab();
+  } catch (error) {
+    console.error('[MemoryPanel] Error editing fact:', error);
+    alert('Failed to edit fact: ' + error.message);
+  }
+}
+
+// ---- Delete Fact ----
+async function deleteFact(memberId) {
+  const fact = memoryFactsCache.find(f => f.id === memberId);
+  if (!fact) return;
+
+  if (!confirm(`Delete this fact?\n\n"${fact.content.substring(0, 100)}..."`)) return;
+
+  try {
+    const res = await fetch(`/api/memory/fact/${memberId}`, {
+      method: 'DELETE'
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to delete fact');
+    }
+
+    loadFactsTab();
+  } catch (error) {
+    console.error('[MemoryPanel] Error deleting fact:', error);
+    alert('Failed to delete fact: ' + error.message);
   }
 }
