@@ -879,6 +879,38 @@ function loadMemoryFiles(memoryDir = path.join(__dirname, '../data/memory')) {
 function getSqliteDb() { return sqliteDb; }
 function getClusterEmbeddingsTable() { return clusterEmbeddingsTable; }
 
+/**
+ * Drop and recreate the cluster_embeddings LanceDB table
+ * Used by rebuild scripts to get a clean table with a fresh index
+ * @returns {Promise<Object>} New cluster embeddings table
+ */
+async function resetClusterEmbeddingsTable() {
+  if (!vectorDb) {
+    throw new Error('Vector store not initialized. Call initVectorStore() first.');
+  }
+
+  // Drop existing table
+  const tableNames = await vectorDb.tableNames();
+  if (tableNames.includes('cluster_embeddings')) {
+    await vectorDb.dropTable('cluster_embeddings');
+    console.log('LanceDB: Dropped cluster_embeddings table');
+  }
+
+  // Recreate with schema
+  const sampleCluster = [{
+    id: randomUUID(),
+    member_id: 'sample',
+    cluster_id: 'sample',
+    content: 'Sample cluster text',
+    vector: Array(768).fill(0)
+  }];
+  clusterEmbeddingsTable = await vectorDb.createTable('cluster_embeddings', sampleCluster);
+  await clusterEmbeddingsTable.delete('id = "' + sampleCluster[0].id + '"');
+  console.log('LanceDB: Recreated cluster_embeddings table');
+
+  return clusterEmbeddingsTable;
+}
+
 // ============ Exports ============
 
 module.exports = {
@@ -911,5 +943,6 @@ module.exports = {
 
   // Accessors for sub-modules
   getSqliteDb,
-  getClusterEmbeddingsTable
+  getClusterEmbeddingsTable,
+  resetClusterEmbeddingsTable
 };

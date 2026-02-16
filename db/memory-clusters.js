@@ -33,7 +33,11 @@ async function generateEmbedding(text) {
     }
 
     const data = await response.json();
-    return data.embedding || null;
+    if (!data.embedding || !Array.isArray(data.embedding)) {
+      return null;
+    }
+    // Return Float32Array to match database.js format (LanceDB expects float32 precision)
+    return new Float32Array(data.embedding);
   } catch (error) {
     if (error.name === 'AbortError') {
       console.error('[Clusters] Embedding generation timeout');
@@ -215,8 +219,11 @@ async function assignToCluster(fact, provider, model, apiKey, host, source = 'co
 
     if (clusterTable) {
       console.log('[Clusters] Searching for similar cluster members');
+      // Convert Float32Array to regular array for LanceDB compatibility
+      const vectorArray = Array.from(embedding);
       const results = await clusterTable
-        .search(embedding)
+        .search(vectorArray)
+        .metricType('cosine')
         .limit(10)
         .execute();
 
@@ -231,7 +238,7 @@ async function assignToCluster(fact, provider, model, apiKey, host, source = 'co
         clusterScores[result.cluster_id].push(similarity);
 
         // Track potential cross-cluster links
-        if (similarity > 0.6) {
+        if (similarity > 0.4) {
           crossClusterCandidates.push({
             clusterId: result.cluster_id,
             similarity: similarity
@@ -256,7 +263,7 @@ async function assignToCluster(fact, provider, model, apiKey, host, source = 'co
     let isNew = false;
 
     // Create new cluster if no good match
-    if (!bestClusterId || bestSimilarity <= 0.75) {
+    if (!bestClusterId || bestSimilarity <= 0.55) {
       console.log('[Clusters] Creating new cluster');
       clusterId = randomUUID();
       clusterName = await generateClusterName(fact, provider, model, apiKey, host);
@@ -290,22 +297,25 @@ async function assignToCluster(fact, provider, model, apiKey, host, source = 'co
 
     // Add embedding to LanceDB
     if (clusterTable) {
+      // Convert Float32Array to regular array for LanceDB compatibility
+      const vectorForStorage = Array.from(embedding);
       await clusterTable.add([{
         id: randomUUID(),
         member_id: memberId,
         cluster_id: clusterId,
         content: fact,
-        vector: embedding
+        vector: vectorForStorage
       }]);
     }
 
-    // Cross-cluster linking
-    if (!isNew && crossClusterCandidates.length > 0) {
-      console.log('[Clusters] Checking for cross-cluster links');
+    // Cross-cluster linking — link when fact is similar to members in other clusters
+    if (crossClusterCandidates.length > 0) {
       const uniqueClusters = [...new Set(crossClusterCandidates.map(c => c.clusterId))];
+      const otherClusters = uniqueClusters.filter(id => id !== clusterId);
 
-      for (const otherClusterId of uniqueClusters) {
-        if (otherClusterId !== clusterId) {
+      if (otherClusters.length > 0) {
+        console.log(`[Clusters] Creating/strengthening ${otherClusters.length} cross-cluster link(s)`);
+        for (const otherClusterId of otherClusters) {
           createOrStrengthenLink(clusterId, otherClusterId, db);
         }
       }
@@ -347,8 +357,11 @@ async function searchClusters(query, limit = 3) {
 
     // Search for similar content
     console.log('[Clusters] Searching for relevant clusters');
+    // Convert Float32Array to regular array for LanceDB compatibility
+    const vectorArray = Array.from(embedding);
     const results = await clusterTable
-      .search(embedding)
+      .search(vectorArray)
+      .metricType('cosine')
       .limit(20)
       .execute();
 

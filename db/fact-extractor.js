@@ -107,6 +107,7 @@ RULES:
 - Each fact MUST be a complete, self-contained sentence with full context.
 - Include: names, preferences, technical specs, relationships, decisions, project details.
 - Do NOT include: greetings, casual chat, temporary context, questions without answers.
+- NEVER attribute facts to "Assistant" — all facts should be about the User. Write "User has..." not "Assistant has...".
 
 GOOD examples (complete, contextual sentences):
 ["User has 4 dogs: Casper, Cece, Calypso, and Erika", "User is migrating from Syncro to Kaseya for RMM", "User's AI server has dual RTX 3090s with 48GB total VRAM"]
@@ -350,8 +351,16 @@ function parseFactsFromResponse(response) {
       return [];
     }
 
-    // Filter out empty strings and non-strings
-    return facts.filter(f => typeof f === 'string' && f.trim().length > 0);
+    // Filter out empty strings, non-strings, and facts about the assistant
+    return facts.filter(f => {
+      if (typeof f !== 'string' || f.trim().length === 0) return false;
+      // Reject facts where the assistant is the subject — these are hallucinations
+      if (/^(the )?assistant\b/i.test(f.trim())) {
+        console.log(`[FactExtractor] Filtered out assistant-subject fact: "${f}"`);
+        return false;
+      }
+      return true;
+    });
 
   } catch (error) {
     console.error('[FactExtractor] Error parsing facts from response:', error.message);
