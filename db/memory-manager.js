@@ -27,7 +27,7 @@ let isRunning = false;
 
 /**
  * Call an LLM with system + user prompts.
- * Tries llamacpp first, falls back to ollama.
+ * Fallback chain: llamacpp/scout → ollama/qwen3:14b → ollama/gemma3:27b
  * @param {string} systemPrompt
  * @param {string} userPrompt
  * @returns {Promise<{content: string, provider: string}>}
@@ -35,59 +35,62 @@ let isRunning = false;
 async function callLLM(systemPrompt, userPrompt) {
   const llamacppHost = process.env.LLAMACPP_HOST || 'http://localhost:8080';
   const ollamaHost = process.env.OLLAMA_HOST || 'http://localhost:11434';
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt }
+  ];
 
-  // Try llamacpp first
-  try {
-    const response = await fetch(`${llamacppHost}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        stream: false
-      }),
-      signal: AbortSignal.timeout(60000)
-    });
+  const providers = [
+    {
+      name: 'llamacpp/scout',
+      url: `${llamacppHost}/v1/chat/completions`,
+      body: { messages, stream: false },
+      extract: (data) => data.choices?.[0]?.message?.content || ''
+    },
+    {
+      name: 'ollama/qwen3:14b',
+      url: `${ollamaHost}/api/chat`,
+      body: { model: 'qwen3:14b', messages, stream: false },
+      extract: (data) => data.message?.content || ''
+    },
+    {
+      name: 'ollama/gemma3:27b',
+      url: `${ollamaHost}/api/chat`,
+      body: { model: 'gemma3:27b', messages, stream: false },
+      extract: (data) => data.message?.content || ''
+    }
+  ];
 
-    if (response.ok) {
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content || '';
-      if (content) {
-        return { content, provider: 'llamacpp' };
+  let lastError = null;
+
+  for (const provider of providers) {
+    try {
+      console.log(`[Heartbeat] Trying ${provider.name} → ${provider.url}`);
+      const response = await fetch(provider.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(provider.body),
+        signal: AbortSignal.timeout(60000)
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
       }
+
+      const data = await response.json();
+      const content = provider.extract(data);
+      if (content) {
+        console.log(`[Heartbeat] ${provider.name} responded (${content.length} chars)`);
+        return { content, provider: provider.name };
+      }
+      throw new Error('Empty response');
+    } catch (err) {
+      console.log(`[Heartbeat] ${provider.name} failed: ${err.message}`);
+      lastError = err;
     }
-  } catch (err) {
-    console.log(`[Heartbeat] llamacpp unavailable: ${err.message}`);
   }
 
-  // Fall back to ollama
-  try {
-    const response = await fetch(`${ollamaHost}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'llama3.2',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        stream: false
-      }),
-      signal: AbortSignal.timeout(60000)
-    });
-
-    if (!response.ok) {
-      throw new Error(`Ollama API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const content = data.message?.content || '';
-    return { content, provider: 'ollama' };
-  } catch (err) {
-    throw new Error(`Both LLM providers failed. Last error: ${err.message}`);
-  }
+  throw new Error(`All LLM providers failed. Last error: ${lastError?.message}`);
 }
 
 /**
