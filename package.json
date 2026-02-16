@@ -1,7 +1,7 @@
 {
-  "name": "ollama-interface",
+  "name": "squatch-neuro-hub",
   "version": "1.0.0",
-  "description": "Multi-provider AI chat interface supporting Ollama, Claude, and Grok",
+  "description": "Squatch Neuro Hub - Neural-linked AI assistant with associative cluster memory, multi-provider support, and heartbeat automation. Part of the Coastal Squatch AI ecosystem.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -15,13 +15,15 @@
     "vectordb": "^0.4.10"
   },
   "keywords": [
+    "squatch-neuro-hub",
+    "coastal-squatch",
+    "ai",
+    "memory",
+    "multi-provider",
     "ollama",
     "claude",
-    "grok",
-    "ai",
-    "chat",
-    "interface"
+    "msp"
   ],
-  "author": "",
+  "author": "MettaSphere LLC",
   "license": "MIT"
 }

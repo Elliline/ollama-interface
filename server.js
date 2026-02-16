@@ -1,7 +1,8 @@
 /**
- * Express backend proxy server for Ollama Chat Interface
- * Handles API key management securely via environment variables
- * Now with conversation history and semantic memory
+ * Squatch Neuro Hub — backend server
+ * Neural-linked AI assistant with associative cluster memory,
+ * multi-provider support, and MCP tool calling.
+ * Part of the Coastal Squatch AI ecosystem.
  */
 
 require('dotenv').config();

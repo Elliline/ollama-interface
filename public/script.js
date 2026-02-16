@@ -1,6 +1,6 @@
 /**
- * Ollama Chat Interface
- * A web-based interface for interacting with local AI models
+ * Squatch Neuro Hub
+ * Neural-linked AI assistant with associative cluster memory and multi-provider support
  */
 
 // DOM Elements
@@ -246,12 +246,12 @@ function loadConversation() {
       renderMessages();
     } else {
       // Show welcome message
-      addMessage('system', 'Welcome to Ollama Chat! Select a model and start chatting.');
+      addMessage('system', 'Welcome to Neuro Hub! Select a provider and model to start chatting.');
     }
   } catch (error) {
     console.error('Error loading conversation:', error);
     conversation = [];
-    addMessage('system', 'Welcome to Ollama Chat! Select a model and start chatting.');
+    addMessage('system', 'Welcome to Neuro Hub! Select a provider and model to start chatting.');
   }
 }
 
