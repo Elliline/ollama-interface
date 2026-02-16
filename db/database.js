@@ -849,6 +849,9 @@ function loadMemoryFiles(memoryDir = path.join(__dirname, '../data/memory')) {
 
     // Load MEMORY.md
     result.memory = readFileSafe(path.join(memoryDir, 'MEMORY.md'), 'MEMORY.md');
+    if (result.memory) {
+      console.log(`[MemoryFiles] MEMORY.md preview (${result.memory.length} chars): "${result.memory.substring(0, 200)}${result.memory.length > 200 ? '...' : ''}"`);
+    }
 
     // Load USER.md
     result.user = readFileSafe(path.join(memoryDir, 'USER.md'), 'USER.md');

@@ -1496,11 +1496,12 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
           console.log('MCP [llamacpp]: Tools were used, making final streaming request');
           console.log('MCP [llamacpp]: Final messages array (' + llamacppMessages.length + ' messages):');
           llamacppMessages.forEach((m, i) => {
-            const preview = typeof m.content === 'string' ? m.content.substring(0, 80) : String(m.content);
-            const extras = [];
+            const contentStr = typeof m.content === 'string' ? m.content : String(m.content);
+            const preview = contentStr.substring(0, 200);
+            const extras = [`${contentStr.length} chars`];
             if (m.tool_calls) extras.push(`tool_calls: ${m.tool_calls.length}`);
             if (m.tool_call_id) extras.push(`tool_call_id: ${m.tool_call_id}`);
-            console.log(`  [${i}] role=${m.role} ${extras.length ? '(' + extras.join(', ') + ')' : ''} content="${preview}"`);
+            console.log(`  [${i}] role=${m.role} (${extras.join(', ')}) content="${preview}${contentStr.length > 200 ? '...' : ''}"`);
           });
         }
       }
