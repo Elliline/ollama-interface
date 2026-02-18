@@ -1525,17 +1525,13 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
         }
       }
 
-      // Final streaming request
-      // When tools were used, include the tools param so llama-server
-      // accepts the tool_calls/tool messages in the conversation history
+      // Final streaming request — no tools array so the model generates
+      // a plain text response instead of trying to make more tool calls
       const finalBody = {
         model,
         stream: true,
         messages: llamacppMessages
       };
-      if (toolsUsed) {
-        finalBody.tools = mcpClient.getToolsForOpenAI();
-      }
 
       console.log('MCP [llamacpp]: Final request body keys:', Object.keys(finalBody), 'tools included:', !!finalBody.tools);
 
