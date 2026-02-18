@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { getConfig } = require('./config');
 
 const MEMORY_DIR = path.join(__dirname, '../data/memory');
 const DAILY_DIR = path.join(MEMORY_DIR, 'daily');
@@ -7,16 +8,19 @@ const DAILY_DIR = path.join(MEMORY_DIR, 'daily');
 // ============ Embedding Helpers ============
 
 /**
- * Generate embedding via Ollama nomic-embed-text (local to this module)
+ * Generate embedding using the configured embedding provider/model (local to this module)
  * @param {string} text - Text to embed
  * @returns {Promise<number[]|null>} Embedding vector or null on failure
  */
 async function generateFactEmbedding(text) {
   try {
-    const response = await fetch('http://localhost:11434/api/embeddings', {
+    const config = getConfig();
+    const embeddingHost = config.providers[config.models.embedding.provider].host;
+    const embeddingModel = config.models.embedding.model;
+    const response = await fetch(`${embeddingHost}/api/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'nomic-embed-text', prompt: text }),
+      body: JSON.stringify({ model: embeddingModel, prompt: text }),
       signal: AbortSignal.timeout(10000)
     });
     if (!response.ok) return null;
@@ -127,9 +131,10 @@ Every extracted fact must be something the USER told you, not something you told
     const timeoutId = setTimeout(() => controller.abort(), 30000);
 
     try {
+      const config = getConfig();
       switch (provider.toLowerCase()) {
         case 'ollama':
-          response = await extractFromOllama(systemPrompt, exchange, model, ollamaHost || 'http://localhost:11434', controller.signal);
+          response = await extractFromOllama(systemPrompt, exchange, model, ollamaHost || config.providers.ollama.host, controller.signal);
           break;
         case 'claude':
           response = await extractFromClaude(systemPrompt, exchange, model, apiKey, controller.signal);
@@ -141,10 +146,10 @@ Every extracted fact must be something the USER told you, not something you told
           response = await extractFromOpenAI(systemPrompt, exchange, model, apiKey, controller.signal);
           break;
         case 'llamacpp':
-          response = await extractFromLlamacpp(systemPrompt, exchange, model, ollamaHost || 'http://localhost:8080', controller.signal);
+          response = await extractFromLlamacpp(systemPrompt, exchange, model, ollamaHost || config.providers.llamacpp.host, controller.signal);
           break;
         case 'squatchserve':
-          response = await extractFromSquatchServe(systemPrompt, exchange, model, ollamaHost || 'http://localhost:8111', controller.signal);
+          response = await extractFromSquatchServe(systemPrompt, exchange, model, ollamaHost || config.providers.llamacpp.host, controller.signal);
           break;
         default:
           console.log(`[FactExtractor] Unsupported provider: ${provider}`);
@@ -341,6 +346,9 @@ async function extractFromSquatchServe(systemPrompt, exchange, model, host, sign
  */
 function parseFactsFromResponse(response) {
   try {
+    // Strip markdown code fences before parsing
+    response = response.replace(/```(?:json)?\s*\n?([\s\S]*?)```/g, '$1').trim();
+
     // Try to find JSON array in the response
     const jsonMatch = response.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {

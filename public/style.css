@@ -1340,6 +1340,134 @@ body {
   display: block;
 }
 
+/* Config settings (Settings tab in memory panel) */
+.config-settings {
+  padding: 4px 0;
+}
+
+.config-loading {
+  color: var(--text-secondary);
+  font-style: italic;
+  text-align: center;
+  padding: 24px 0;
+}
+
+.config-section {
+  margin-bottom: 20px;
+  border-left: 3px solid var(--primary-color);
+  padding-left: 12px;
+}
+
+.config-section h3 {
+  font-size: 0.9rem;
+  color: var(--primary-color);
+  margin-bottom: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.config-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.config-item label {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+.config-item input[type="text"],
+.config-item input[type="number"] {
+  flex: 1;
+  max-width: 180px;
+  padding: 5px 8px;
+  border-radius: var(--border-radius);
+  border: 1px solid var(--border-color);
+  background-color: var(--background-color);
+  color: var(--text-color);
+  font-family: monospace;
+  font-size: 0.82rem;
+}
+
+.config-item input[type="text"]:focus,
+.config-item input[type="number"]:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.config-item input[type="checkbox"] {
+  accent-color: var(--primary-color);
+  width: 16px;
+  height: 16px;
+}
+
+.config-item select {
+  flex: 1;
+  max-width: 180px;
+  padding: 5px 8px;
+  border-radius: var(--border-radius);
+  border: 1px solid var(--border-color);
+  background-color: var(--background-color);
+  color: var(--text-color);
+  font-family: monospace;
+  font-size: 0.82rem;
+}
+
+.config-item select:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.config-save-btn {
+  width: 100%;
+  padding: 10px;
+  margin-top: 16px;
+  border-radius: var(--border-radius);
+  border: none;
+  background-color: var(--primary-color);
+  color: white;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.config-save-btn:hover {
+  background-color: #8a66ff;
+}
+
+.config-notice {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  font-style: italic;
+  margin-top: 8px;
+  text-align: center;
+}
+
+.config-status {
+  text-align: center;
+  padding: 8px;
+  margin-top: 8px;
+  border-radius: var(--border-radius);
+  font-size: 0.82rem;
+}
+
+.config-status.success {
+  color: var(--success-color);
+  background-color: rgba(16, 185, 129, 0.1);
+}
+
+.config-status.error {
+  color: var(--error-color);
+  background-color: rgba(239, 68, 68, 0.1);
+}
+
 /* Scrollbar for memory panel */
 .memory-panel-content::-webkit-scrollbar {
   width: 6px;

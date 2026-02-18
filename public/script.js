@@ -1675,6 +1675,7 @@ function switchMemoryTab(name) {
   if (name === 'facts') loadFactsTab();
   else if (name === 'clusters') loadClustersTab();
   else if (name === 'daily') loadDailyTab();
+  else if (name === 'settings') loadSettingsTab();
 }
 
 // ---- Facts Tab ----
@@ -1974,5 +1975,174 @@ async function deleteFact(memberId) {
   } catch (error) {
     console.error('[MemoryPanel] Error deleting fact:', error);
     alert('Failed to delete fact: ' + error.message);
+  }
+}
+
+// ---- Settings Tab ----
+
+function createConfigSection(title, fields) {
+  const section = document.createElement('div');
+  section.className = 'config-section';
+  section.innerHTML = `<h3>${title}</h3>`;
+
+  for (const field of fields) {
+    const item = document.createElement('div');
+    item.className = 'config-item';
+
+    const label = document.createElement('label');
+    label.textContent = field.label;
+    item.appendChild(label);
+
+    let input;
+    if (field.type === 'checkbox') {
+      input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = !!field.value;
+      input.dataset.configKey = field.key;
+    } else if (field.type === 'select') {
+      input = document.createElement('select');
+      for (const opt of field.options) {
+        const option = document.createElement('option');
+        option.value = opt;
+        option.textContent = opt;
+        if (opt === field.value) option.selected = true;
+        input.appendChild(option);
+      }
+      input.dataset.configKey = field.key;
+    } else {
+      input = document.createElement('input');
+      input.type = field.type || 'text';
+      input.value = field.value ?? '';
+      if (field.type === 'number' && field.step) input.step = field.step;
+      input.dataset.configKey = field.key;
+    }
+
+    item.appendChild(input);
+    section.appendChild(item);
+  }
+
+  return section;
+}
+
+async function loadSettingsTab() {
+  const container = document.querySelector('.config-settings');
+  if (!container) return;
+  container.innerHTML = '<div class="config-loading">Loading configuration...</div>';
+
+  try {
+    const res = await fetch('/api/config');
+    if (!res.ok) throw new Error('Failed to load config');
+    const config = await res.json();
+
+    container.innerHTML = '';
+
+    // Providers section
+    container.appendChild(createConfigSection('Providers', [
+      { key: 'providers.ollama.host', label: 'Ollama Host', value: config.providers?.ollama?.host },
+      { key: 'providers.llamacpp.host', label: 'Llama.cpp Host', value: config.providers?.llamacpp?.host }
+    ]));
+
+    // Models section
+    container.appendChild(createConfigSection('Models', [
+      { key: 'models.chat.provider', label: 'Chat Provider', type: 'select', value: config.models?.chat?.provider, options: ['ollama', 'llamacpp'] },
+      { key: 'models.chat.model', label: 'Chat Model', value: config.models?.chat?.model },
+      { key: 'models.extraction.provider', label: 'Extraction Provider', type: 'select', value: config.models?.extraction?.provider, options: ['ollama', 'llamacpp'] },
+      { key: 'models.extraction.model', label: 'Extraction Model', value: config.models?.extraction?.model },
+      { key: 'models.heartbeat.provider', label: 'Heartbeat Provider', type: 'select', value: config.models?.heartbeat?.provider, options: ['ollama', 'llamacpp'] },
+      { key: 'models.heartbeat.model', label: 'Heartbeat Model', value: config.models?.heartbeat?.model },
+      { key: 'models.embedding.provider', label: 'Embedding Provider', type: 'select', value: config.models?.embedding?.provider, options: ['ollama', 'llamacpp'] },
+      { key: 'models.embedding.model', label: 'Embedding Model', value: config.models?.embedding?.model }
+    ]));
+
+    // Heartbeat section
+    container.appendChild(createConfigSection('Heartbeat', [
+      { key: 'heartbeat.enabled', label: 'Enabled', type: 'checkbox', value: config.heartbeat?.enabled },
+      { key: 'heartbeat.intervalHours', label: 'Interval (hours)', type: 'number', value: config.heartbeat?.intervalHours, step: '0.5' },
+      { key: 'heartbeat.warmupMinutes', label: 'Warmup (minutes)', type: 'number', value: config.heartbeat?.warmupMinutes, step: '1' }
+    ]));
+
+    // Memory thresholds section
+    container.appendChild(createConfigSection('Memory Thresholds', [
+      { key: 'memory.similarityThreshold', label: 'Similarity Threshold', type: 'number', value: config.memory?.similarityThreshold, step: '0.05' },
+      { key: 'memory.clusterLinkThreshold', label: 'Cluster Link Threshold', type: 'number', value: config.memory?.clusterLinkThreshold, step: '0.05' },
+      { key: 'memory.dailyLogRetentionDays', label: 'Daily Log Retention (days)', type: 'number', value: config.memory?.dailyLogRetentionDays, step: '1' },
+      { key: 'memory.hybridSearchWeights.vector', label: 'Vector Weight', type: 'number', value: config.memory?.hybridSearchWeights?.vector, step: '0.1' },
+      { key: 'memory.hybridSearchWeights.bm25', label: 'BM25 Weight', type: 'number', value: config.memory?.hybridSearchWeights?.bm25, step: '0.1' }
+    ]));
+
+    // Save button
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'config-save-btn';
+    saveBtn.textContent = 'Save Settings';
+    saveBtn.addEventListener('click', saveConfigSettings);
+    container.appendChild(saveBtn);
+
+    // Status area
+    const status = document.createElement('div');
+    status.id = 'configStatus';
+    container.appendChild(status);
+
+    // Notice
+    const notice = document.createElement('div');
+    notice.className = 'config-notice';
+    notice.textContent = 'Heartbeat interval changes require a server restart.';
+    container.appendChild(notice);
+
+  } catch (error) {
+    console.error('[Settings] Error loading config:', error);
+    container.innerHTML = '<div class="config-loading">Failed to load configuration.</div>';
+  }
+}
+
+async function saveConfigSettings() {
+  const container = document.querySelector('.config-settings');
+  if (!container) return;
+
+  // Collect all inputs by data-config-key and build nested object
+  const partial = {};
+  container.querySelectorAll('[data-config-key]').forEach(input => {
+    const keys = input.dataset.configKey.split('.');
+    let obj = partial;
+    for (let i = 0; i < keys.length - 1; i++) {
+      if (!obj[keys[i]]) obj[keys[i]] = {};
+      obj = obj[keys[i]];
+    }
+    const lastKey = keys[keys.length - 1];
+    if (input.type === 'checkbox') {
+      obj[lastKey] = input.checked;
+    } else if (input.type === 'number') {
+      const num = parseFloat(input.value);
+      if (!isNaN(num)) obj[lastKey] = num;
+    } else {
+      obj[lastKey] = input.value;
+    }
+  });
+
+  const statusEl = document.getElementById('configStatus');
+
+  try {
+    const res = await fetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(partial)
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to save');
+    }
+
+    if (statusEl) {
+      statusEl.className = 'config-status success';
+      statusEl.textContent = 'Settings saved successfully.';
+      setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 3000);
+    }
+  } catch (error) {
+    console.error('[Settings] Error saving config:', error);
+    if (statusEl) {
+      statusEl.className = 'config-status error';
+      statusEl.textContent = 'Failed to save: ' + error.message;
+      setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
+    }
   }
 }

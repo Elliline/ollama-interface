@@ -1,5 +1,6 @@
 const { randomUUID } = require('crypto');
 const { getSqliteDb, getClusterEmbeddingsTable } = require('./database');
+const { getConfig } = require('./config');
 
 // Stop words filtered out during cluster naming
 const STOP_WORDS = new Set([
@@ -33,11 +34,14 @@ async function generateEmbedding(text) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
 
-    const response = await fetch('http://localhost:11434/api/embeddings', {
+    const config = getConfig();
+    const embeddingHost = config.providers[config.models.embedding.provider].host;
+    const embeddingModel = config.models.embedding.model;
+    const response = await fetch(`${embeddingHost}/api/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'nomic-embed-text',
+        model: embeddingModel,
         prompt: text
       }),
       signal: controller.signal
@@ -405,6 +409,7 @@ function createOrStrengthenLink(clusterA, clusterB, db) {
  */
 async function assignToCluster(fact, provider, model, apiKey, host, source = 'conversation') {
   try {
+    const config = getConfig();
     const db = getSqliteDb();
     if (!db) {
       console.error('[Clusters] Database not initialized');
@@ -446,7 +451,7 @@ async function assignToCluster(fact, provider, model, apiKey, host, source = 'co
         clusterScores[result.cluster_id].push(similarity);
 
         // Track potential cross-cluster links
-        if (similarity > 0.4) {
+        if (similarity > config.memory.clusterLinkThreshold) {
           crossClusterCandidates.push({
             clusterId: result.cluster_id,
             similarity: similarity
@@ -471,7 +476,7 @@ async function assignToCluster(fact, provider, model, apiKey, host, source = 'co
     let isNew = false;
 
     // Create new cluster if no good match
-    if (!bestClusterId || bestSimilarity <= 0.55) {
+    if (!bestClusterId || bestSimilarity <= config.memory.similarityThreshold) {
       console.log('[Clusters] Creating new cluster');
       clusterId = randomUUID();
       clusterName = await generateClusterName(fact, provider, model, apiKey, host);
@@ -781,7 +786,10 @@ function isPersonFact(text) {
  * @param {number} threshold - Minimum similarity to merge (default 0.50)
  * @returns {Promise<number>} - Number of singletons merged
  */
-async function mergeSingletons(threshold = 0.50) {
+async function mergeSingletons(threshold) {
+  if (threshold === undefined) {
+    threshold = getConfig().memory.clusterLinkThreshold;
+  }
   try {
     const db = getSqliteDb();
     if (!db) return 0;

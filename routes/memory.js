@@ -11,6 +11,7 @@ const path = require('path');
 const db = require('../db/database');
 const memoryClusters = require('../db/memory-clusters');
 const factExtractor = require('../db/fact-extractor');
+const { getConfig } = require('../db/config');
 
 const MEMORY_DIR = path.join(__dirname, '../data/memory');
 
@@ -120,7 +121,7 @@ router.post('/search', async (req, res) => {
     }
 
     const searchLimit = Math.min(Math.max(parseInt(limit) || 10, 1), 50);
-    const results = await db.hybridSearch(searchQuery, '', searchLimit, 0.4);
+    const results = await db.hybridSearch(searchQuery, '', searchLimit);
 
     res.json({ query: searchQuery, results });
   } catch (error) {
@@ -142,9 +143,13 @@ router.post('/add', async (req, res) => {
       return res.status(400).json({ error: 'Fact text is required' });
     }
 
-    // Assign to cluster
+    // Assign to cluster using config-driven embedding provider
+    const config = getConfig();
+    const embeddingProvider = config.models.embedding.provider;
+    const embeddingModel = config.models.embedding.model;
+    const embeddingHost = config.providers[embeddingProvider].host;
     const clusterResult = await memoryClusters.assignToCluster(
-      cleanFact, 'ollama', 'llama3.2', '', 'http://localhost:11434', 'manual'
+      cleanFact, embeddingProvider, embeddingModel, '', embeddingHost, 'manual'
     );
 
     // Append to MEMORY.md

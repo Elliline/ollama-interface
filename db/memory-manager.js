@@ -11,6 +11,7 @@
 const fs = require('fs');
 const path = require('path');
 const { randomUUID } = require('crypto');
+const { getConfig } = require('./config');
 
 const { getSqliteDb, getClusterEmbeddingsTable } = require('./database');
 const memoryClusters = require('./memory-clusters');
@@ -27,37 +28,38 @@ let isRunning = false;
 
 /**
  * Call an LLM with system + user prompts.
- * Fallback chain: llamacpp/scout → ollama/qwen3:14b → ollama/gemma3:27b
+ * Uses the heartbeat model/provider from config.
  * @param {string} systemPrompt
  * @param {string} userPrompt
  * @returns {Promise<{content: string, provider: string}>}
  */
 async function callLLM(systemPrompt, userPrompt) {
-  const llamacppHost = process.env.LLAMACPP_HOST || 'http://localhost:8080';
-  const ollamaHost = process.env.OLLAMA_HOST || 'http://localhost:11434';
+  const config = getConfig();
+  const heartbeatModel = config.models.heartbeat;
+  const host = config.providers[heartbeatModel.provider].host;
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userPrompt }
   ];
 
+  // Build provider call based on config
+  let url, body, extract;
+  if (heartbeatModel.provider === 'llamacpp') {
+    url = `${host}/v1/chat/completions`;
+    body = { messages, stream: false };
+    extract = (data) => data.choices?.[0]?.message?.content || '';
+  } else {
+    url = `${host}/api/chat`;
+    body = { model: heartbeatModel.model, messages, stream: false };
+    extract = (data) => data.message?.content || '';
+  }
+
   const providers = [
     {
-      name: 'llamacpp/scout',
-      url: `${llamacppHost}/v1/chat/completions`,
-      body: { messages, stream: false },
-      extract: (data) => data.choices?.[0]?.message?.content || ''
-    },
-    {
-      name: 'ollama/qwen3:14b',
-      url: `${ollamaHost}/api/chat`,
-      body: { model: 'qwen3:14b', messages, stream: false },
-      extract: (data) => data.message?.content || ''
-    },
-    {
-      name: 'ollama/gemma3:27b',
-      url: `${ollamaHost}/api/chat`,
-      body: { model: 'gemma3:27b', messages, stream: false },
-      extract: (data) => data.message?.content || ''
+      name: `${heartbeatModel.provider}/${heartbeatModel.model}`,
+      url,
+      body,
+      extract
     }
   ];
 
@@ -520,17 +522,19 @@ async function summarizeDailyLogs() {
     }
 
     const files = fs.readdirSync(DAILY_DIR).filter(f => f.endsWith('.md'));
+    const config = getConfig();
+    const retentionDays = config.memory.dailyLogRetentionDays;
     const now = new Date();
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000);
 
     const oldFiles = files.filter(f => {
       const dateStr = f.replace('.md', '');
       const fileDate = new Date(dateStr);
-      return !isNaN(fileDate.getTime()) && fileDate < sevenDaysAgo;
+      return !isNaN(fileDate.getTime()) && fileDate < cutoff;
     });
 
     if (oldFiles.length === 0) {
-      console.log('[Heartbeat] No daily logs older than 7 days');
+      console.log(`[Heartbeat] No daily logs older than ${retentionDays} days`);
       return results;
     }
 
@@ -698,19 +702,27 @@ async function runMaintenance() {
 }
 
 /**
- * Start the heartbeat timer
- * @param {number} intervalMs - Interval between runs (default: 2 hours)
+ * Start the heartbeat timer using config values for interval and warmup.
  */
-function startHeartbeat(intervalMs = 2 * 60 * 60 * 1000) {
+function startHeartbeat() {
+  const config = getConfig();
+
+  if (!config.heartbeat.enabled) {
+    console.log('[Heartbeat] Disabled by config, skipping startup');
+    return;
+  }
+
   if (heartbeatTimer) {
     console.log('[Heartbeat] Already running, ignoring start');
     return;
   }
 
-  const intervalHours = (intervalMs / (60 * 60 * 1000)).toFixed(1);
-  console.log(`[Heartbeat] Scheduled every ${intervalHours}h (first run in 5min)`);
+  const intervalMs = config.heartbeat.intervalHours * 60 * 60 * 1000;
+  const warmupMs = config.heartbeat.warmupMinutes * 60 * 1000;
 
-  // 5-minute warmup delay, then first run + interval
+  console.log(`[Heartbeat] Scheduled every ${config.heartbeat.intervalHours}h (first run in ${config.heartbeat.warmupMinutes}min)`);
+
+  // Warmup delay, then first run + interval
   setTimeout(() => {
     runMaintenance().catch(err => {
       console.error('[Heartbeat] Initial run error:', err.message);
@@ -721,7 +733,7 @@ function startHeartbeat(intervalMs = 2 * 60 * 60 * 1000) {
         console.error('[Heartbeat] Scheduled run error:', err.message);
       });
     }, intervalMs);
-  }, 5 * 60 * 1000);
+  }, warmupMs);
 }
 
 /**

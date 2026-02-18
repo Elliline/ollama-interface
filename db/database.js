@@ -8,6 +8,7 @@ const lancedb = require('vectordb');
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
+const { getConfig } = require('./config');
 
 // Database paths
 const DATA_DIR = path.join(__dirname, '../data');
@@ -422,11 +423,14 @@ async function initVectorStore() {
  */
 async function generateEmbedding(text) {
   try {
-    const response = await fetch('http://localhost:11434/api/embeddings', {
+    const config = getConfig();
+    const embeddingHost = config.providers[config.models.embedding.provider].host;
+    const embeddingModel = config.models.embedding.model;
+    const response = await fetch(`${embeddingHost}/api/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'nomic-embed-text',
+        model: embeddingModel,
         prompt: text
       })
     });
@@ -490,7 +494,10 @@ async function addEmbedding(message_id, conversation_id, text, role, vector) {
  * @param {number} threshold - Similarity threshold (0-1, higher is more similar)
  * @returns {Promise<Array>} Array of similar messages
  */
-async function searchSimilar(vector, excludeConversationId, limit = 5, threshold = 0.7) {
+async function searchSimilar(vector, excludeConversationId, limit = 5, threshold) {
+  if (threshold === undefined) {
+    threshold = getConfig().memory.similarityThreshold;
+  }
   try {
     if (!embeddingsTable) {
       throw new Error('Vector store not initialized. Call initVectorStore() first.');
@@ -702,7 +709,10 @@ function searchBM25(query, excludeConversationId, limit = 10) {
  * @param {number} threshold - Similarity threshold for vector search (0-1)
  * @returns {Promise<Array>} Array of search results with combined scores
  */
-async function hybridSearch(query, excludeConversationId, limit = 5, threshold = 0.6) {
+async function hybridSearch(query, excludeConversationId, limit = 5, threshold) {
+  if (threshold === undefined) {
+    threshold = getConfig().memory.similarityThreshold;
+  }
   try {
     console.log(`[HybridSearch] Query: "${query}", limit: ${limit}, threshold: ${threshold}`);
 
@@ -772,8 +782,9 @@ async function hybridSearch(query, excludeConversationId, limit = 5, threshold =
     }
 
     // Step 5: Calculate combined scores and sort
-    const weightVector = 0.6;
-    const weightBM25 = 0.4;
+    const config = getConfig();
+    const weightVector = config.memory.hybridSearchWeights.vector;
+    const weightBM25 = config.memory.hybridSearchWeights.bm25;
 
     const combinedResults = Array.from(resultsMap.values()).map(result => {
       const finalScore = (weightVector * result.vectorScore) + (weightBM25 * result.bm25Score);

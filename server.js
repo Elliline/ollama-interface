@@ -25,6 +25,9 @@ const memoryManager = require('./db/memory-manager');
 // MCP tool calling
 const MCPClient = require('./mcp/mcp-client');
 
+// Configuration
+const { getConfig, updateConfig } = require('./db/config');
+
 // Routes
 const conversationsRouter = require('./routes/conversations');
 const memoryRouter = require('./routes/memory');
@@ -103,6 +106,20 @@ app.use('/api/conversations', conversationsRouter);
 
 // Mount memory routes
 app.use('/api/memory', memoryRouter);
+
+// ============ Config API ============
+
+app.get('/api/config', (req, res) => {
+  res.json(getConfig());
+});
+
+app.put('/api/config', (req, res) => {
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    return res.status(400).json({ error: 'Request body must be a JSON object' });
+  }
+  const updated = updateConfig(req.body);
+  res.json(updated);
+});
 
 // ============ Security Validation Functions ============
 
@@ -1118,7 +1135,7 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
     // === UPGRADE 2: Hybrid search (vector + BM25) ===
     let memoryContext = [];
     try {
-      memoryContext = await db.hybridSearch(userMessage.content, convoId, 5, 0.6);
+      memoryContext = await db.hybridSearch(userMessage.content, convoId, 5);
       console.log('Hybrid search results:', memoryContext.length);
       if (memoryContext.length > 0) {
         memoryContext.forEach((msg, i) => {
@@ -1708,13 +1725,14 @@ app.listen(PORT, () => {
   console.log('Conversation features:');
   console.log('  - Chat history: SQLite');
   console.log('  - Semantic memory: LanceDB (vector) + SQLite FTS5 (BM25)');
-  console.log('  - Hybrid search: 0.6 vector + 0.4 BM25');
+  const startupConfig = getConfig();
+  console.log(`  - Hybrid search: ${startupConfig.memory.hybridSearchWeights.vector} vector + ${startupConfig.memory.hybridSearchWeights.bm25} BM25`);
   console.log('  - Fact extraction: Auto-extract after each exchange');
   console.log('  - Memory flush: Auto-compact at 80% context usage');
   console.log('  - Memory clusters: Associative cluster-aware retrieval');
   console.log(`  - Memory files: data/memory/ (MEMORY.md, USER.md, daily/)`);
   console.log(`  - MCP tools: ${mcpClient.hasTools() ? mcpClient.getToolNames().join(', ') : 'None'}`);
-  console.log('  - Memory heartbeat: Every 2h (first run in 5min)');
+  console.log(`  - Memory heartbeat: ${startupConfig.heartbeat.enabled ? `Every ${startupConfig.heartbeat.intervalHours}h (first run in ${startupConfig.heartbeat.warmupMinutes}min)` : 'Disabled'}`);
   if (ALLOWED_OLLAMA_HOSTS.length > 0) {
     console.log(`  - Additional Ollama hosts: ${ALLOWED_OLLAMA_HOSTS.join(', ')}`);
   }
