@@ -1348,6 +1348,10 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
 
         if (toolsUsed) {
           console.log('MCP [ollama]: Tools were used, making final streaming request');
+          ollamaMessages.push({
+            role: 'system',
+            content: 'Tool calls are complete. Now provide your response to the user based on the information gathered.'
+          });
         }
       }
 
@@ -1525,13 +1529,26 @@ app.post('/api/chat/memory', chatLimiter, async (req, res) => {
         }
       }
 
-      // Final streaming request — no tools array so the model generates
-      // a plain text response instead of trying to make more tool calls
+      // Final streaming request
+      // Tools must stay in the request body so llama-server's Jinja
+      // template can handle tool_calls/tool messages in the history.
+      // Append a nudge so the model responds with text instead of
+      // attempting more tool calls.
+      if (toolsUsed) {
+        llamacppMessages.push({
+          role: 'system',
+          content: 'Tool calls are complete. Now provide your response to the user based on the information gathered.'
+        });
+      }
+
       const finalBody = {
         model,
         stream: true,
         messages: llamacppMessages
       };
+      if (toolsUsed) {
+        finalBody.tools = mcpClient.getToolsForOpenAI();
+      }
 
       console.log('MCP [llamacpp]: Final request body keys:', Object.keys(finalBody), 'tools included:', !!finalBody.tools);
 
