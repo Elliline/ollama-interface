@@ -690,10 +690,15 @@ function loadMemoryContext(memoryDir) {
  */
 async function processFactExtraction(userMessage, assistantMessage, provider, model, apiKey, ollamaHost, memoryDir = MEMORY_DIR) {
   try {
-    console.log('[FactExtractor] Processing fact extraction');
+    // Always use the configured extraction model, independent of chat model
+    const config = getConfig();
+    const extractionProvider = config.models.extraction.provider;
+    const extractionModel = config.models.extraction.model;
+    const extractionHost = config.providers[extractionProvider]?.host || ollamaHost;
+    console.log(`[FactExtractor] Using extraction model: ${extractionProvider}/${extractionModel}`);
 
-    // Extract facts
-    const facts = await extractFacts(userMessage, assistantMessage, provider, model, apiKey, ollamaHost);
+    // Extract facts using the configured extraction model
+    const facts = await extractFacts(userMessage, assistantMessage, extractionProvider, extractionModel, apiKey, extractionHost);
 
     // Append to memory if facts found
     if (facts.length > 0) {
@@ -704,7 +709,7 @@ async function processFactExtraction(userMessage, assistantMessage, provider, mo
       try {
         const memoryClusters = require('./memory-clusters');
         for (const fact of facts) {
-          await memoryClusters.assignToCluster(fact, provider, model, apiKey, ollamaHost, 'fact-extraction');
+          await memoryClusters.assignToCluster(fact, extractionProvider, extractionModel, apiKey, extractionHost, 'fact-extraction');
         }
         console.log(`[FactExtractor] Assigned ${facts.length} facts to clusters`);
       } catch (clusterError) {
@@ -713,7 +718,7 @@ async function processFactExtraction(userMessage, assistantMessage, provider, mo
     }
 
     // Create daily log summary
-    const summary = `Chat exchange with ${provider}/${model} - ${facts.length} facts extracted`;
+    const summary = `Chat exchange with ${extractionProvider}/${extractionModel} - ${facts.length} facts extracted`;
     const dailyDir = path.join(memoryDir, 'daily');
     appendToDailyLog(summary, dailyDir);
 
